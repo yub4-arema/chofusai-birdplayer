@@ -1,0 +1,8 @@
+:root{color-scheme:dark;font-family:system-ui,-apple-system,sans-serif;color:#edf6ff;background:#0c1c2c;font-size:14px}
+*{box-sizing:border-box}body{margin:0;width:356px}main{padding:22px}h1{font-size:22px;margin:5px 0 10px;letter-spacing:-.5px}
+.eyebrow{font-size:10px;letter-spacing:1.6px;color:#7abace;margin:0}.intro{line-height:1.7;color:#b9cfdf;margin:0 0 18px}
+label{display:block;font-weight:600;margin:14px 0 6px}input:not([type=checkbox]),select{width:100%;font:inherit;color:inherit;background:#142c41;border:1px solid #40617a;border-radius:7px;padding:10px}
+small{font-size:11px;display:block;color:#9ebdce;margin-top:5px}.check{display:flex;align-items:center;gap:7px;font-size:12px;font-weight:400;margin-bottom:14px}.check input{accent-color:#9ee4f9}
+button{font:inherit;font-weight:700;border:1px solid #9ee4f9;border-radius:8px;background:#bceeff;color:#102939;padding:10px 14px;cursor:pointer}.secondary{background:transparent;border-color:#4c718b;color:#def0ff}
+button:disabled{opacity:.5;cursor:wait}button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible{outline:3px solid #edbd6a;outline-offset:2px}
+form>button{width:100%}.actions{display:flex;gap:8px;margin-top:20px}.actions #start{flex:1}#status{font-size:12px;line-height:1.6;min-height:38px;color:#dceaff;white-space:pre-wrap}.links{display:flex;justify-content:space-between;font-size:12px}a{color:#9ee4f9}.note{font-size:11px;color:#9bb4c6;line-height:1.7;margin-bottom:4px}.text-button{border:0;background:none;color:#b4c8d7;font-size:11px;padding:8px 0;font-weight:400;text-decoration:underline}

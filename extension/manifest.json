@@ -1,0 +1,17 @@
+{
+  "manifest_version": 3,
+  "name": "調布祭 Flappy × Jev",
+  "version": "1.1.0",
+  "description": "調布祭マップのミニゲームで、Jevが通過位置を選び、拡張機能がクリックのタイミングを制御します。",
+  "permissions": ["storage"],
+  "host_permissions": ["https://api.typesafe.ai/*"],
+  "optional_host_permissions": ["https://*/*", "http://localhost/*", "http://127.0.0.1/*"],
+  "background": { "service_worker": "background.js" },
+  "action": { "default_popup": "popup.html", "default_title": "調布祭 Flappy × Jev" },
+  "content_scripts": [{
+    "matches": ["https://www.chofusai.jp/map/", "https://www.chofusai.jp/map"],
+    "js": ["core.js", "content.js"],
+    "run_at": "document_idle"
+  }],
+  "content_security_policy": { "extension_pages": "script-src 'self'; object-src 'none'" }
+}

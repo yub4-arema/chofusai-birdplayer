@@ -1,0 +1,12 @@
+.DS_Store
+node_modules/
+.env
+.env.*
+*.pem
+*.key
+secrets/
+credentials/
+dist/
+*.zip
+playwright-report/
+test-results/
