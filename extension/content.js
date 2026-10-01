@@ -21,14 +21,15 @@
     <div class="box">
       <div class="row"><strong>調布祭 Flappy × Jev</strong><div><button id="start">開始</button> <button id="stop" disabled>停止</button></div></div>
       <p id="message" role="status" aria-live="polite">拡張機能のアイコンからAPIキーを設定して、開始してください。</p>
-      <small id="stats">Jevが通過位置を選び、タイミング制御がクリックを実行します。</small>
+      <small id="stats">Jevが各観測でクリックか待機を選び、クリック操作を実行します。</small>
     </div>`;
   game.before(host);
   const message = shadow.getElementById("message"), stats = shadow.getElementById("stats");
   const startButton = shadow.getElementById("start"), stopButton = shadow.getElementById("stop");
+  const DECISION_INTERVAL_MS = 160, MAX_ACTION_LATENCY_MS = 900;
   let running = false, generation = 0, timer = null, session = null, prefs = null;
-  let last = null, lastFlap = 0, tracks = [], nextId = 0, pending = false;
-  let requests = 0, decisions = 0, lastLatency = null, selected = "middle", restartAt = null;
+  let last = null, lastFlap = 0, pending = false, nextDecisionAt = 0;
+  let requests = 0, decisions = 0, lastLatency = null, restartAt = null;
   let best = 0, bestKey = "chofu-jev-best";
   const score = () => Number(game.querySelector("[data-score]")?.textContent || 0) || 0;
   function showStats() {
@@ -40,7 +41,7 @@
     generation++;
     running = false;
     clearTimeout(timer); timer = null;
-    last = null; pending = false;
+    last = null; pending = false; nextDecisionAt = 0;
     controls(); message.textContent = reason; showStats();
     send({ type: "run:stop" }).catch(() => {});
   }
@@ -48,7 +49,7 @@
     stage.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, cancelable: true, pointerType: "mouse", button: 0, buttons: 1 }));
     lastFlap = performance.now();
   }
-  function resetTracking() { last = null; tracks = []; nextId = 0; pending = false; restartAt = null; }
+  function resetTracking() { last = null; pending = false; nextDecisionAt = 0; restartAt = null; }
   async function start() {
     if (running) return { ok: true };
     const epoch = ++generation;
@@ -66,7 +67,7 @@
       stage.focus({ preventScroll: true });
       const restart = game.querySelector('[data-action="restart"]');
       if (restart) { restart.click(); lastFlap = performance.now(); } else flap();
-      message.textContent = prefs.mode === "jev" ? `${prefs.model}でプレイ中。判断待ちは中央を狙います。` : "ローカルテスト中（Jev APIは使用していません）。";
+      message.textContent = prefs.mode === "jev" ? `${prefs.model}がクリックか待機を判断しています。` : "ローカルテスト中（Jev APIは使用していません）。";
       timer = setTimeout(tick, 20); showStats();
       return { ok: true };
     } catch (error) {
@@ -74,45 +75,59 @@
       return { ok: false, error: error.message };
     }
   }
-  function assignTracks(frame, dt) {
-    const used = new Set();
-    const previous = tracks;
-    tracks = frame.obstacles.map(o => {
-      const match = previous.find(t => !used.has(t.id) && Math.abs(t.gapTop - o.gapTop) < 3 &&
-        Math.abs(t.gapBottom - o.gapBottom) < 3 && Math.abs(t.x - 165 * frame.scale * dt - o.x) < 28);
-      if (match) { used.add(match.id); return { ...match, ...o }; }
-      return { ...o, id: ++nextId, choice: "middle", asked: false };
-    });
+  function decisionState(frame, velocity) {
+    const horizon = Math.max(100, Math.min(750, lastLatency ?? 250));
+    const seconds = horizon / 1000;
+    const gravity = 1500 * frame.scale, speedX = 165 * frame.scale;
+    const thresholdX = frame.player.x - frame.player.radius;
+    const upcoming = frame.obstacles
+      .filter(obstacle => obstacle.x + obstacle.width >= thresholdX)
+      .sort((a, b) => a.x - b.x)
+      .slice(0, 2);
+    const project = obstacle => obstacle ? { ...obstacle, x: obstacle.x - speedX * seconds } : null;
+    return {
+      screen: { width: frame.width, height: frame.height },
+      player: { ...frame.player, velocityY: velocity },
+      physics: { gravity, flapVelocity: -430 * frame.scale, speedX },
+      next: upcoming[0] ?? null,
+      following: upcoming[1] ?? null,
+      since_last_click_ms: Math.max(0, performance.now() - lastFlap),
+      decision_horizon_ms: horizon,
+      predicted_at_response: {
+        player_y: frame.player.y + velocity * seconds + 0.5 * gravity * seconds ** 2,
+        player_velocity_y: velocity + gravity * seconds,
+        next: project(upcoming[0]),
+        following: project(upcoming[1])
+      }
+    };
   }
-  async function ask(frame, next, velocity) {
-    const epoch = generation, trackId = next.id;
-    pending = true; next.asked = true;
-    const candidateTargets = ChofuJev.plans(frame, next);
+  async function ask(frame, velocity) {
+    const epoch = generation;
+    pending = true;
     try {
-      const following = tracks.find(t => t.x > next.x + next.width + 10);
-      const response = await send({
-        type: "decide", id: session,
-        state: {
-          screen: { width: frame.width, height: frame.height },
-          player: { ...frame.player, velocityY: velocity },
-          physics: { gravity: 1500 * frame.scale, flapVelocity: -430 * frame.scale, speedX: 165 * frame.scale },
-          next, following: following ?? null, candidate_targets: candidateTargets
-        }
-      });
+      const response = await send({ type: "decide", id: session, state: decisionState(frame, velocity) });
       if (epoch !== generation || !running) return;
       if (!response.ok) throw new Error(response.error);
       requests = response.requests; lastLatency = response.latencyMs;
-      const current = tracks.find(t => t.id === trackId);
-      if (current && current.x + current.width >= frame.player.x - frame.player.radius) {
-        current.choice = response.choice;
-        selected = response.choice; decisions++;
-        const labels = { upper: "上寄り", middle: "中央", lower: "下寄り" };
-        message.textContent = `Jev: ${labels[selected]}を選択${response.confidence === null ? "" : ` ／ 信頼度 ${Math.round(response.confidence * 100)}%`} ／ ${response.model === "unknown" ? prefs.model : response.model}`;
+      if (response.latencyMs > MAX_ACTION_LATENCY_MS) {
+        stop(`Jevの応答が${MAX_ACTION_LATENCY_MS}msを超えたため、古い判断を実行せず停止しました。`);
+        return;
       }
+      decisions++;
+      const over = game.querySelector('[data-panel="over"]');
+      if (response.action === "click" && over?.hidden !== false) flap();
+      const actionLabel = response.action === "click" ? "クリック" : "待機";
+      message.textContent = `Jev: ${actionLabel}${response.confidence === null ? "" : ` ／ 信頼度 ${Math.round(response.confidence * 100)}%`} ／ ${response.model === "unknown" ? prefs.model : response.model}`;
       showStats();
+      if (requests >= prefs.maxRequests) stop("API呼び出し上限に達したため停止しました。");
     } catch (error) {
       if (epoch === generation && running) stop(error.message);
-    } finally { if (epoch === generation) pending = false; }
+    } finally {
+      if (epoch === generation) {
+        pending = false;
+        nextDecisionAt = performance.now() + DECISION_INTERVAL_MS;
+      }
+    }
   }
   function tick() {
     if (!running) return;
@@ -141,11 +156,13 @@
       const dt = last ? (now - last.time) / 1000 : 0.04;
       let velocity = last && dt < 0.2 ? (frame.player.y - last.y) / dt : 0;
       velocity = Math.max(-500 * frame.scale, Math.min(1000 * frame.scale, velocity));
-      assignTracks(frame, dt);
-      const next = tracks.find(o => o.x + o.width >= frame.player.x - frame.player.radius);
-      const target = next ? ChofuJev.plans(frame, next)[next.choice] : frame.height / 2;
-      if (next && prefs.mode === "jev" && !next.asked && !pending) void ask(frame, next, velocity);
-      if (ChofuJev.flapNeeded(frame, target, velocity, now - lastFlap)) flap();
+      if (prefs.mode === "jev") {
+        if (!pending && now >= nextDecisionAt) void ask(frame, velocity);
+      } else {
+        const next = frame.obstacles.find(o => o.x + o.width >= frame.player.x - frame.player.radius);
+        const target = next ? (next.gapTop + next.gapBottom) / 2 : frame.height / 2;
+        if (ChofuJev.flapNeeded(frame, target, velocity, now - lastFlap)) flap();
+      }
       last = { time: now, y: frame.player.y };
       showStats(); timer = setTimeout(tick, 20);
     } catch (error) { stop(`読み取りエラー：${error.message}`); }

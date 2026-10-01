@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "調布祭 Flappy × Jev",
-  "version": "1.1.0",
-  "description": "調布祭マップのミニゲームで、Jevが通過位置を選び、拡張機能がクリックのタイミングを制御します。",
+  "version": "1.2.0",
+  "description": "調布祭マップのミニゲームで、Jevがクリックするか待つかを判断します。",
   "permissions": ["storage"],
   "host_permissions": ["https://api.typesafe.ai/*"],
   "optional_host_permissions": ["https://*/*", "http://localhost/*", "http://127.0.0.1/*"],

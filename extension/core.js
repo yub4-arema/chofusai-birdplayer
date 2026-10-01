@@ -54,13 +54,6 @@
       obstacles: obstacles.sort((a, b) => a.x - b.x)
     };
   }
-  function plans(frame, obstacle) {
-    const center = (obstacle.gapTop + obstacle.gapBottom) / 2;
-    // Leave room for the ~62*scale rise caused by a normal flap.
-    const freedom = Math.max(0, (obstacle.gapBottom - obstacle.gapTop) / 2 - frame.player.radius - 40 * frame.scale);
-    const offset = Math.min(14 * frame.scale, freedom);
-    return { upper: center - offset, middle: center, lower: center + offset };
-  }
   function flapNeeded(frame, target, velocity, sinceFlap) {
     if (sinceFlap < 110) return false;
     const lookAhead = 0.02;
@@ -72,26 +65,25 @@
       model,
       state,
       questions: {
-        route: {
+        action: {
           type: "choice",
-          instructions: "Choose the best target height for the NEXT obstacle in this Flappy-style game. The player falls under gravity and a flap sets upward velocity. A local controller will flap to track your chosen target. Prefer middle for clearance; use upper or lower if it improves the transition to the following gap. Coordinates increase DOWNWARD. Select a target that maximizes survival. Do not give explanations.",
+          instructions: "Choose the immediate gameplay action for the moment this response is received. Select click to send exactly one flap click now, or wait to send no input until the next observation. The extension executes your choice directly; no local controller chooses flap timing or tracks a target height. Use predicted_at_response as the estimated state when your answer arrives. The player falls under gravity and a click sets upward velocity. Coordinates increase DOWNWARD. Prefer survival through the next and following gaps. Do not give explanations.",
           criteria: {
-            upper: "Track the upper target_y_px listed in candidate_targets.",
-            middle: "Track the middle target_y_px listed in candidate_targets; greatest symmetric clearance.",
-            lower: "Track the lower target_y_px listed in candidate_targets."
+            click: "Send one flap click immediately when your response is received.",
+            wait: "Do not click before the next observation."
           }
         }
       }
     };
   }
   function parseDecision(result) {
-    const answer = result?.answers?.route;
+    const answer = result?.answers?.action;
     const confidence = answer?.confidence ?? answer?.answer_confidence ?? answer?.probabilities?.[answer?.choice] ?? null;
-    if (answer?.type !== "choice" || !["upper", "middle", "lower"].includes(answer.choice) ||
+    if (answer?.type !== "choice" || !["click", "wait"].includes(answer.choice) ||
         (confidence !== null && (!Number.isFinite(confidence) || confidence < 0 || confidence > 1))) {
       throw new Error("Jevの応答形式が不正です。");
     }
-    return { choice: answer.choice, confidence, model: String(result.model ?? "unknown").slice(0, 200) };
+    return { action: answer.choice, confidence, model: String(result.model ?? "unknown").slice(0, 200) };
   }
   function endpoint(value) {
     if (typeof value !== "string" || value.length > 2048) throw new Error("接続先URLを確認してください。");
@@ -112,22 +104,27 @@
       if (!Number.isFinite(n) || n < low || n > high) throw new Error("ゲーム状態が範囲外です。");
       return Math.round(n * 100) / 100;
     };
-    const obstacle = o => ({
+    const obstacle = o => o == null ? null : ({
       x: number(o?.x, -200, 10000), width: number(o?.width, 1, 200),
       gapTop: number(o?.gapTop, 0, 10000), gapBottom: number(o?.gapBottom, 0, 10000)
     });
+    const predicted = input.predicted_at_response;
+    if (!predicted || typeof predicted !== "object") throw new Error("ゲーム状態が不正です。");
     return {
       screen: { width: number(input.screen?.width, 100, 10000), height: number(input.screen?.height, 100, 10000) },
       player: { x: number(input.player?.x, 0, 10000), y: number(input.player?.y, 0, 10000),
         radius: number(input.player?.radius, 1, 100), velocityY: number(input.player?.velocityY, -5000, 5000) },
       physics: { gravity: number(input.physics?.gravity, 500, 3000), flapVelocity: number(input.physics?.flapVelocity, -1000, -100), speedX: number(input.physics?.speedX, 50, 500) },
-      next: obstacle(input.next), following: input.following ? obstacle(input.following) : null,
-      candidate_targets: {
-        upper: number(input.candidate_targets?.upper, 0, 10000),
-        middle: number(input.candidate_targets?.middle, 0, 10000),
-        lower: number(input.candidate_targets?.lower, 0, 10000)
+      next: obstacle(input.next), following: obstacle(input.following),
+      since_last_click_ms: number(input.since_last_click_ms, 0, 100000),
+      decision_horizon_ms: number(input.decision_horizon_ms, 0, 1000),
+      predicted_at_response: {
+        player_y: number(predicted.player_y, -1000, 10000),
+        player_velocity_y: number(predicted.player_velocity_y, -5000, 5000),
+        next: obstacle(predicted.next),
+        following: obstacle(predicted.following)
       }
     };
   }
-  globalThis.ChofuJev = Object.freeze({ observe, plans, flapNeeded, buildRequest, parseDecision, sanitizeState, endpoint, originPattern });
+  globalThis.ChofuJev = Object.freeze({ observe, flapNeeded, buildRequest, parseDecision, sanitizeState, endpoint, originPattern });
 })();

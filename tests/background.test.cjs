@@ -37,10 +37,11 @@ const state = {
   screen: { width: 672, height: 360 }, player: { x: 163, y: 180, radius: 13, velocityY: 25 },
   physics: { gravity: 1500, flapVelocity: -430, speedX: 165 },
   next: { x: 600, width: 30, gapTop: 100, gapBottom: 265 }, following: null,
-  candidate_targets: { upper: 169, middle: 183, lower: 197 },
+  since_last_click_ms: 320, decision_horizon_ms: 250,
+  predicted_at_response: { player_y: 233, player_velocity_y: 400, next: { x: 559, width: 30, gapTop: 100, gapBottom: 265 }, following: null },
   pageText: 'This page property must never be sent to the API.'
 };
-const result = { model: 'jev-test', answers: { route: { type: 'choice', choice: 'middle', confidence: 0.9 } } };
+const result = { model: 'jev-test', answers: { action: { type: 'choice', choice: 'click', confidence: 0.9 } } };
 test('only extension popup can save/read config; game cannot retrieve the key', async () => {
   const { handle, stores } = harness();
   await assert.rejects(handle({ type: 'config:save', config: prefs, apiKey: 'fake' }, game), /専用/);
@@ -65,13 +66,18 @@ test('API request matches official contract and drops page properties; budget is
     assert.equal(url, 'https://api.typesafe.ai/v1/systemone');
     assert.equal(options.headers.Authorization, 'Bearer fake-test-key');
     const body = JSON.parse(options.body);
-    assert.equal(body.model, 'jev-latest'); assert.equal(body.questions.route.type, 'choice');
+    assert.equal(body.model, 'jev-latest'); assert.equal(body.questions.action.type, 'choice');
+    assert.deepEqual(body.questions.action.criteria, {
+      click: 'Send one flap click immediately when your response is received.',
+      wait: 'Do not click before the next observation.'
+    });
     assert.equal(body.state.pageText, undefined);
     assert.equal(body.state.next.id, undefined);
+    assert.equal(body.state.predicted_at_response.player_y, 233);
     return new Response(JSON.stringify(result), { status: 200 });
   };
   const answer = await handle({ type: 'decide', id: run.id, state }, game);
-  assert.equal(answer.ok, true); assert.equal(answer.choice, 'middle'); assert.equal(answer.requests, 1);
+  assert.equal(answer.ok, true); assert.equal(answer.action, 'click'); assert.equal(answer.requests, 1);
   await assert.rejects(handle({ type: 'decide', id: run.id, state }, game), /上限/);
   assert.equal(calls, 1);
 });
@@ -118,7 +124,7 @@ test('invalid decisions and HTTP errors are reported; server body is not exposed
   context.fetch = async () => new Response('private-server-message', { status: 401 });
   await assert.rejects(handle({ type: 'decide', id: run.id, state }, game), /APIキーが無効/);
   run = await handle({ type: 'run:begin' }, game);
-  context.fetch = async () => new Response(JSON.stringify({ answers: { route: { type: 'choice', choice: 'execute_script', confidence: 0.9 } } }), { status: 200 });
+  context.fetch = async () => new Response(JSON.stringify({ answers: { action: { type: 'choice', choice: 'execute_script', confidence: 0.9 } } }), { status: 200 });
   await assert.rejects(handle({ type: 'decide', id: run.id, state }, game), /応答形式が不正/);
 });
 test('endpoint keys persist separately; local System One never receives the TypeSafe key', async () => {
