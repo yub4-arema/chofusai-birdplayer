@@ -68,8 +68,23 @@ test('API request matches official contract and drops page properties; budget is
     const body = JSON.parse(options.body);
     assert.equal(body.model, 'jev-latest'); assert.equal(body.questions.action.type, 'choice');
     assert.deepEqual(body.questions.action.criteria, {
-      click: 'Reset upward velocity once when this answer arrives, because that timing best preserves survival and reaching the opening.',
-      wait: 'Leave the player without a flap until another answer, because delaying the flap best preserves survival and reaching the opening.'
+      click: {
+        effect: 'Set velocityY to flapVelocity once, AFTER decision_horizon_ms has elapsed.',
+        choose_when: [
+          'Without this flap, the player would reach the floor or the lower obstacle before another answer can intervene, and this flap would avoid that contact.',
+          'The approaching opening requires upward motion at answer time, and a flap would allow entry without hitting the ceiling or upper obstacle.'
+        ],
+        boundary_cases: 'A slightly negative observed velocity can become downward during the response delay. An opening far ahead does not remove the need to prevent falling into the floor now.'
+      },
+      wait: {
+        effect: 'Keep the current motion with gravity and no flap until the NEXT answer, including both response delays and decision_interval_ms.',
+        choose_when: [
+          'Waiting through the full interval keeps the player alive and leaves a later answer time to act.',
+          'The player is above an approaching lower opening and needs to descend into it; a flap would keep the player above gapTop or send it into the upper obstacle.',
+          'A flap would cause contact with the ceiling or upper obstacle, and waiting gives a better chance to survive.'
+        ],
+        boundary_cases: 'Do not wait solely because observed velocityY is negative or the player is in the upper half. Account for falling during both response delays. Do not click solely because an earlier apex example chose click: the next opening may require descent.'
+      }
     });
     assert.equal(body.state.pageText, undefined);
     assert.equal(body.state.next.id, undefined);

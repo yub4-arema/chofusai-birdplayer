@@ -66,7 +66,7 @@ JevはTypeSafe AIのSystem Oneモデルです。定義済みの選択肢を選�
 - 認証: `Authorization: Bearer <APIキー>`
 - モデル初期値: `jev-latest`。バージョン固定する場合は設定欄に有効な `jev-...` のモデル名を入力します。
 - リクエスト: `{ model, state, questions: { action: { type: "choice", instructions, criteria } } }`。`state.protocol` は `observed-state-v1`。`state.vertical_bounds` に上下壁の位置を含めます。予測位置・軌道・衝突フラグ・安全余裕は含めません。`instructions` にルールと固定10件の判断例を含めます。
-- 選択肢: `click`（応答を受け取ったら1回クリック）または `wait`（次の観測まで入力なし）。
+- 選択肢: `click`（応答を受け取ったら1回クリック）または `wait`（次の応答まで入力なし）。
 - 応答: `answers.action.choice` と `answers.action.confidence` を検証して使用します。
 
 参考:
@@ -96,6 +96,14 @@ node --check extension/popup.js
 ```
 
 `core.js` はCanvas読み取り・判断例・API形式、`content.js` は状態推定・Jev判断の実行とページ内UI、`background.js` はキー管理とAPI通信、`popup.*` は設定画面です。[判断例の数値](docs/decision-examples.json)、[v1.2.5のログ分析](docs/diagnostics-v1.2.5.md)、[v1.2.6のログ分析](docs/diagnostics-v1.2.6.md)を公開しています。
+
+### v1.2.8の変更
+
+v1.2.7の4試行は0、0、0、3点でした。56要求すべてに応答が記録され、所要時間は中央値204.5ms、最大421msです。下降中に待ちすぎて床へ落ちる場面に加え、3点の試行では低い隙間へ降りる途中のクリックで上昇し、隙間の上側へ接触した状況が見られました。[ログ分析](docs/diagnostics-v1.2.7.md)に数値と判断の経過を記録しています。
+
+抽象的だったclick/waitのcriteriaを、床・上下の障害物・次の応答待ち・低い隙間へ降りる条件の説明に変更しました。速度が上向きなのに「下降」と書かれていた例の名前も修正しました。例の数値と選択ラベルは同じ10件です。現在の状態に対する衝突判定や未来位置は送りません。モデルの比較ではcriteriaの版もそろえてください。
+
+[Jev 1.13の公式制約](https://docs.typesafe.ai/model-jaggedness/jev-1.13)は精密な数値計算や多段階の推論が不得手と説明しています。今回の説明修正で物理予測や得点が改善するかは未確認です。JavaScript構文と配布用JSONの形式のみ確認し、自動テストと変更後の実API・Chrome実プレイは行っていません。
 
 ### v1.2.7の変更
 

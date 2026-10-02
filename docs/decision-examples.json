@@ -72,7 +72,7 @@
     "correct_choice": "wait"
   },
   {
-    "name": "Downward motion in the lower half",
+    "name": "Near the apex in the lower half",
     "state": {
       "protocol": "observed-state-v1",
       "screen": {
