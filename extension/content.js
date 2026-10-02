@@ -17,27 +17,40 @@
       button{font:inherit;font-weight:700;border:1px solid #7293ab;border-radius:8px;padding:7px 14px;background:#d2f4ff;color:#092133;cursor:pointer}
       button:disabled{opacity:.5;cursor:default}button:focus-visible{outline:3px solid #fbc96b;outline-offset:3px}
       #stop{background:transparent;color:#edf6ff}#message{white-space:pre-wrap}
+      #logData{box-sizing:border-box;width:100%;margin-top:10px;background:#091a29;color:#edf6ff;border:1px solid #416078;border-radius:8px;padding:8px;font:11px/1.4 ui-monospace,monospace}
     </style>
     <div class="box">
-      <div class="row"><strong>調布祭 Flappy × Jev</strong><div><button id="start">開始</button> <button id="stop" disabled>停止</button></div></div>
+      <div class="row"><strong>調布祭 Flappy × Jev</strong><div><button id="start">開始</button> <button id="stop" disabled>停止</button> <button id="log" disabled>ログをコピー</button></div></div>
       <p id="message" role="status" aria-live="polite">拡張機能のアイコンからAPIキーを設定して、開始してください。</p>
       <small id="stats">Jevが各観測でクリックか待機を選び、クリック操作を実行します。</small>
+      <textarea id="logData" aria-label="診断ログ" rows="10" readonly hidden></textarea>
     </div>`;
   game.before(host);
   const message = shadow.getElementById("message"), stats = shadow.getElementById("stats");
   const startButton = shadow.getElementById("start"), stopButton = shadow.getElementById("stop");
+  const logButton = shadow.getElementById("log"), logData = shadow.getElementById("logData");
   const DECISION_INTERVAL_MS = 160, MAX_ACTION_LATENCY_MS = 900;
+  const LOG_INTERVAL_MS = 50, MAX_LOG_EVENTS = 2400;
   let running = false, generation = 0, timer = null, session = null, prefs = null;
   let last = null, lastFlap = 0, pending = false, nextDecisionAt = 0;
   let requests = 0, decisions = 0, lastLatency = null, restartAt = null;
+  let diagnosticEvents = [], runStartedAt = null, runStartedWall = null, lastLoggedAt = -Infinity, attemptNumber = 0;
+  let diagnosticsTruncated = false, gameOverLogged = false;
   let best = 0, bestKey = "chofu-jev-best";
   const score = () => Number(game.querySelector("[data-score]")?.textContent || 0) || 0;
   function showStats() {
     stats.textContent = `スコア ${score()} ／ ベスト ${best} ／ Jev判断 ${decisions}回 ／ API ${requests}/${prefs?.maxRequests ?? 200}回${lastLatency === null ? "" : ` ／ ${lastLatency}ms`}`;
   }
+  function record(type, detail = {}) {
+    if (runStartedAt === null) return;
+    diagnosticEvents.push({ t_ms: Math.round(performance.now() - runStartedAt), type, ...detail });
+    if (diagnosticEvents.length > MAX_LOG_EVENTS) { diagnosticEvents.shift(); diagnosticsTruncated = true; }
+    logButton.disabled = false;
+  }
   const send = msg => chrome.runtime.sendMessage(msg);
-  function controls() { startButton.disabled = running; stopButton.disabled = !running; }
+  function controls() { startButton.disabled = running; stopButton.disabled = !running; logButton.disabled = diagnosticEvents.length === 0; }
   function stop(reason = "停止しました。") {
+    record("stop", { reason, score: score(), pending });
     generation++;
     running = false;
     clearTimeout(timer); timer = null;
@@ -45,9 +58,10 @@
     controls(); message.textContent = reason; showStats();
     send({ type: "run:stop" }).catch(() => {});
   }
-  function flap() {
+  function flap(source = "local") {
     stage.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, cancelable: true, pointerType: "mouse", button: 0, buttons: 1 }));
     lastFlap = performance.now();
+    record("click", { source, score: score() });
   }
   function resetTracking() { last = null; pending = false; nextDecisionAt = 0; restartAt = null; }
   async function start() {
@@ -63,10 +77,19 @@
       best = 0;
       try { best = Number(localStorage.getItem(bestKey) || 0) || 0; } catch {}
       resetTracking();
+      diagnosticEvents = []; runStartedAt = performance.now(); runStartedWall = new Date().toISOString();
+      lastLoggedAt = -Infinity; attemptNumber = 0; diagnosticsTruncated = false; gameOverLogged = false;
+      logData.hidden = true; logData.value = "";
       stage.scrollIntoView({ block: "center", behavior: "instant" });
       stage.focus({ preventScroll: true });
       const restart = game.querySelector('[data-action="restart"]');
-      if (restart) { restart.click(); lastFlap = performance.now(); } else flap();
+      record("start", {
+        started_at: runStartedWall, mode: prefs.mode, model: prefs.model,
+        start_method: restart ? "restart-button" : "pointer-click",
+        stage: { width: stage.clientWidth, height: stage.clientHeight },
+        canvas: { width: canvas.width, height: canvas.height }
+      });
+      if (restart) { restart.click(); lastFlap = performance.now(); record("restart", { source: "start" }); } else flap("start");
       message.textContent = prefs.mode === "jev" ? `${prefs.model}がクリックか待機を判断しています。` : "ローカルテスト中（Jev APIは使用していません）。";
       timer = setTimeout(tick, 20); showStats();
       return { ok: true };
@@ -104,23 +127,36 @@
   async function ask(frame, velocity) {
     const epoch = generation;
     pending = true;
+    const attempt = ++attemptNumber;
+    const requestStartedAt = performance.now();
+    let state, diagnosticState = null;
     try {
-      const response = await send({ type: "decide", id: session, state: decisionState(frame, velocity) });
+      state = decisionState(frame, velocity);
+      diagnosticState = ChofuJev.sanitizeState(state);
+      record("request", { attempt, state: diagnosticState });
+      const response = await send({ type: "decide", id: session, state });
       if (epoch !== generation || !running) return;
       if (!response.ok) throw new Error(response.error);
       requests = response.requests; lastLatency = response.latencyMs;
+      record("response", {
+        attempt, action: response.action, confidence: response.confidence,
+        model: response.model, api_latency_ms: response.latencyMs,
+        end_to_end_ms: Math.round(performance.now() - requestStartedAt), requests
+      });
       if (response.latencyMs > MAX_ACTION_LATENCY_MS) {
         stop(`Jevの応答が${MAX_ACTION_LATENCY_MS}msを超えたため、古い判断を実行せず停止しました。`);
         return;
       }
       decisions++;
       const over = game.querySelector('[data-panel="over"]');
-      if (response.action === "click" && over?.hidden !== false) flap();
+      if (response.action === "click" && over?.hidden !== false) flap("jev");
+      record("action", { attempt, action: response.action, executed: response.action !== "click" || over?.hidden !== false, score: score() });
       const actionLabel = response.action === "click" ? "クリック" : "待機";
       message.textContent = `Jev: ${actionLabel}${response.confidence === null ? "" : ` ／ 信頼度 ${Math.round(response.confidence * 100)}%`} ／ ${response.model === "unknown" ? prefs.model : response.model}`;
       showStats();
       if (requests >= prefs.maxRequests) stop("API呼び出し上限に達したため停止しました。");
     } catch (error) {
+      record("request_error", { attempt, error: error.message, end_to_end_ms: Math.round(performance.now() - requestStartedAt), state: diagnosticState });
       if (epoch === generation && running) stop(error.message);
     } finally {
       if (epoch === generation) {
@@ -143,21 +179,35 @@
         try { localStorage.setItem(bestKey, String(best)); } catch {}
       }
       if (!game.querySelector('[data-panel="over"]')?.hidden) {
+        if (!gameOverLogged) {
+          record("game_over", { score: currentScore, pending, last_latency_ms: lastLatency });
+          gameOverLogged = true;
+        }
         showStats();
         if (!prefs.autoRestart) { stop(`ゲーム終了：${currentScore}点。開始で再挑戦できます。`); return; }
         if (restartAt === null) { restartAt = now + 650; message.textContent = `${currentScore}点で終了。再挑戦します…`; }
         if (now >= restartAt && !pending) {
-          game.querySelector('[data-action="restart"]')?.click(); lastFlap = now; resetTracking();
+          game.querySelector('[data-action="restart"]')?.click(); lastFlap = now; record("restart", { source: "auto", score: currentScore }); resetTracking(); gameOverLogged = false;
         }
         timer = setTimeout(tick, 20); return;
       }
       const frame = ChofuJev.observe(ctx.getImageData(0, 0, canvas.width, canvas.height), rect.width, rect.height);
       if (!frame) { stop("赤いプレイヤーを読み取れませんでした。ページを再読み込みしてください。"); return; }
       const dt = last ? (now - last.time) / 1000 : 0;
-      let velocity = last && dt > 0 && dt < 0.2
+      const velocitySource = last && dt > 0 && dt < 0.2 ? "frame-delta" : "physics-since-click";
+      let velocity = velocitySource === "frame-delta"
         ? (frame.player.y - last.y) / dt
         : -430 * frame.scale + 1500 * frame.scale * Math.max(0, (now - lastFlap) / 1000);
       velocity = Math.max(-500 * frame.scale, Math.min(1000 * frame.scale, velocity));
+      if (now - lastLoggedAt >= LOG_INTERVAL_MS) {
+        record("observation", {
+          score: currentScore, pending, velocity_source: velocitySource,
+          screen: { width: frame.width, height: frame.height, scale: frame.scale },
+          player: { ...frame.player, velocityY: Math.round(velocity * 100) / 100 },
+          obstacles: frame.obstacles.slice(0, 8)
+        });
+        lastLoggedAt = now;
+      }
       if (prefs.mode === "jev") {
         if (!pending && now >= nextDecisionAt) void ask(frame, velocity);
       } else {
@@ -171,6 +221,20 @@
   }
   startButton.addEventListener("click", () => void start());
   stopButton.addEventListener("click", () => stop());
+  logButton.addEventListener("click", async () => {
+    const payload = JSON.stringify({
+      format: "chofu-jev-diagnostics-v1", extension_version: chrome.runtime.getManifest().version,
+      started_at: runStartedWall, truncated: diagnosticsTruncated,
+      events: diagnosticEvents
+    }, null, 2);
+    try {
+      await navigator.clipboard.writeText(payload);
+      logData.hidden = true; message.textContent = "診断ログをコピーしました。ここに貼り付けてください。";
+    } catch {
+      logData.value = payload; logData.hidden = false; logData.focus(); logData.select();
+      message.textContent = "ログを選択しました。Ctrl+Cでコピーして、ここに貼り付けてください。";
+    }
+  });
   window.addEventListener("pagehide", () => stop());
   window.addEventListener("resize", () => { if (running) stop("画面サイズが変わったため停止しました。開始で再開できます。"); });
   document.addEventListener("visibilitychange", () => { if (document.hidden && running) stop("タブを離れたため停止しました。"); });
