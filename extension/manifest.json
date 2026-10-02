@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "調布祭 Flappy × Jev",
-  "version": "1.3.0",
-  "description": "調布祭マップのミニゲームで、Jevが固定のクリック予定、またはクリック／待機を選択します。",
+  "version": "1.4.0",
+  "description": "調布祭マップのミニゲームで、JevがリアルタイムにFLAP／WAITを判断します。",
   "permissions": ["storage"],
   "host_permissions": ["https://api.typesafe.ai/*"],
   "optional_host_permissions": ["https://*/*", "http://localhost/*", "http://127.0.0.1/*"],

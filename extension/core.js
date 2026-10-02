@@ -54,12 +54,6 @@
       obstacles: obstacles.sort((a, b) => a.x - b.x)
     };
   }
-  function flapNeeded(frame, target, velocity, sinceFlap) {
-    if (sinceFlap < 110) return false;
-    const lookAhead = 0.02;
-    const predicted = frame.player.y + velocity * lookAhead + 0.5 * 1500 * frame.scale * lookAhead ** 2;
-    return predicted > target + 32 * frame.scale || predicted + frame.player.radius > frame.height - 5 * frame.scale;
-  }
   function buildRequest(state, model) {
     return {
       model, state,
@@ -118,6 +112,143 @@
       probabilities = { click, wait };
     }
     return { action: action.choice, confidence, probabilities, model: String(result.model ?? "unknown").slice(0, 200) };
+  }
+  const REFLEX_REQUEST_INTERVAL_MS = 50;
+  const REFLEX_MAX_IN_FLIGHT = 12;
+  const REFLEX_MAX_LATE_MS = 250;
+  const REFLEX_MAX_PREDICTION_MS = 1500;
+  function sanitizeReflexState(input) {
+    if (!input || typeof input !== "object") throw new Error("Jev reflex state is invalid.");
+    const number = (n, low, high) => {
+      if (!Number.isFinite(n) || n < low || n > high) throw new Error("Jev reflex state is out of range.");
+      return Math.round(n * 100) / 100;
+    };
+    const height = number(input.screen?.height, 100, 10000);
+    const playerX = number(input.player?.x, -10000, 10000);
+    const playerY = number(input.player?.y, -10000, 20000);
+    const velocityY = number(input.player?.velocityY, -5000, 5000);
+    const radius = number(input.player?.radius, 1, 100);
+    const gravity = number(input.physics?.gravity, 500, 3000);
+    const flapVelocity = number(input.physics?.flapVelocity, -1000, -100);
+    const speedX = number(input.physics?.speedX, 50, 500);
+    const obstacle = value => value == null ? null : ({
+      x: number(value.x, -10000, 10000),
+      horizontal_distance: number(value.horizontal_distance, -20000, 20000),
+      width: number(value.width, 1, 500),
+      gapTop: number(value.gapTop, -10000, 10000),
+      gapBottom: number(value.gapBottom, -10000, 10000)
+    });
+    const next = obstacle(input.next_obstacle);
+    const following = obstacle(input.following_obstacle);
+    const targetTime = number(input.timing?.target_time, 0, 1000000000);
+    const predictedLatency = number(input.timing?.predicted_latency, 0, 1500);
+    const gapPosition = !next ? "no_obstacle"
+      : playerY < next.gapTop ? "above_gap"
+        : playerY > next.gapBottom ? "below_gap" : "inside_gap";
+    return {
+      protocol: "jev-reflex-neutral-v1",
+      screen: { height },
+      player: { y: playerY, velocityY, radius },
+      next_obstacle: next,
+      following_obstacle: following,
+      physics: { gravity, flapVelocity, speedX },
+      timing: { target_time: targetTime, predicted_latency: predictedLatency, unit: "ms_since_run_start" },
+      observations: {
+        vertical_motion: velocityY < -0.5 ? "rising" : velocityY > 0.5 ? "falling" : "level",
+        relative_to_next_gap: gapPosition,
+        screen_half: playerY < height / 2 ? "upper_half" : "lower_half"
+      }
+    };
+  }
+  function predictReflexState(input, deltaMs, targetTime, predictedLatency) {
+    if (!input || typeof input !== "object") throw new Error("Observed game state is invalid.");
+    if (!Number.isFinite(deltaMs) || deltaMs < 0 || deltaMs > REFLEX_MAX_PREDICTION_MS) {
+      throw new Error("Prediction interval is out of range.");
+    }
+    const height = input.screen?.height;
+    let playerX = input.player?.x;
+    let playerY = input.player?.y;
+    let velocityY = input.player?.velocityY;
+    const radius = input.player?.radius;
+    const gravity = input.physics?.gravity;
+    const flapVelocity = input.physics?.flapVelocity;
+    const speedX = input.physics?.speedX;
+    const next = input.next_obstacle ? { ...input.next_obstacle } : null;
+    const following = input.following_obstacle ? { ...input.following_obstacle } : null;
+    const obstacleValues = [next, following].filter(Boolean);
+    if (![height, playerX, playerY, velocityY, radius, gravity, flapVelocity, speedX].every(Number.isFinite) ||
+        obstacleValues.some(o => ![o.x, o.width, o.gapTop, o.gapBottom].every(Number.isFinite))) {
+      throw new Error("Observed game state is invalid.");
+    }
+    // Match the game's semi-implicit update in short frame-sized steps. This only
+    // extrapolates measured physics; it does not evaluate collisions or actions.
+    let remaining = deltaMs / 1000;
+    while (remaining > 0) {
+      const dt = Math.min(1 / 60, remaining);
+      velocityY += gravity * dt;
+      playerY += velocityY * dt;
+      for (const obstacle of obstacleValues) obstacle.x -= speedX * dt;
+      remaining -= dt;
+    }
+    const toObstacle = obstacle => obstacle && ({
+      x: obstacle.x, horizontal_distance: obstacle.x - playerX,
+      width: obstacle.width, gapTop: obstacle.gapTop, gapBottom: obstacle.gapBottom
+    });
+    return sanitizeReflexState({
+      screen: { height },
+      player: { x: playerX, y: playerY, velocityY, radius },
+      next_obstacle: toObstacle(next), following_obstacle: toObstacle(following),
+      physics: { gravity, flapVelocity, speedX },
+      timing: { target_time: targetTime, predicted_latency: predictedLatency }
+    });
+  }
+  function buildReflexRequest(state, model) {
+    return {
+      model, state,
+      questions: {
+        action: {
+          type: "choice",
+          instructions: {
+            task: "For the supplied state at timing.target_time, choose exactly one input: FLAP or WAIT.",
+            rules: [
+              "The player y coordinate increases downward. velocityY is pixels per second, gravity is pixels per second squared, and obstacle positions are pixels.",
+              "timing.target_time is milliseconds from game start. The supplied position, velocity, and obstacle positions are extrapolated to that time from the latest rendered observation using the listed physics.",
+              "At timing.target_time, FLAP is one standard game click and sets velocityY to flapVelocity. WAIT is no input; existing motion continues under gravity and obstacles continue moving at speedX.",
+              "The extension applies your selected input once at timing.target_time. No local action recommendation or collision result is included."
+            ]
+          },
+          criteria: {
+            FLAP: { effect: "At target_time, issue exactly one click. It sets velocityY to flapVelocity." },
+            WAIT: { effect: "At target_time, issue no input. Current motion continues under gravity and obstacles move at speedX." }
+          }
+        }
+      }
+    };
+  }
+  function parseReflexDecision(result) {
+    const answer = result?.answers?.action;
+    const confidence = answer?.confidence ?? answer?.answer_confidence ?? null;
+    if (answer?.type !== "choice" || !["FLAP", "WAIT"].includes(answer.choice) ||
+        (confidence !== null && (!Number.isFinite(confidence) || confidence < 0 || confidence > 1))) {
+      throw new Error("Jev reflex response is invalid.");
+    }
+    let probabilities = null;
+    if (answer.probabilities !== undefined) {
+      const values = answer.probabilities;
+      if (!values || typeof values !== "object" || Array.isArray(values) ||
+          Object.keys(values).length !== 2 || !["FLAP", "WAIT"].every(name => Number.isFinite(values[name]) && values[name] >= 0 && values[name] <= 1) ||
+          Math.abs(values.FLAP + values.WAIT - 1) > 0.02) {
+        throw new Error("Jev reflex probabilities are invalid.");
+      }
+      probabilities = { FLAP: values.FLAP, WAIT: values.WAIT };
+    }
+    return { action: answer.choice, confidence, probabilities, model: String(result.model ?? "unknown").slice(0, 200) };
+  }
+  function reflexDiscardReason(request, currentFlapEpoch, now, gameOver, maxLateMs = REFLEX_MAX_LATE_MS) {
+    if (gameOver) return "game_over";
+    if (request.flap_epoch !== currentFlapEpoch) return "superseded";
+    if (now - request.target_at > maxLateMs) return "stale";
+    return null;
   }
   const PLAN_SLOT_MS = 200, PLAN_HORIZON_MS = 800, PLAN_REPLAN_MS = 400;
   const planOptions = Object.freeze(Object.fromEntries(Array.from({ length: 16 }, (_, mask) => {
@@ -289,6 +420,8 @@
       sample_age_ms: number(input.sample_age_ms ?? 0, 0, 1000)
     };
   }
-  globalThis.ChofuJev = Object.freeze({ observe, flapNeeded, buildRequest, parseDecision, sanitizeState, estimateLatency, endpoint, originPattern,
+  globalThis.ChofuJev = Object.freeze({ observe, buildRequest, parseDecision, sanitizeState, estimateLatency, endpoint, originPattern,
+    predictReflexState, sanitizeReflexState, buildReflexRequest, parseReflexDecision, reflexDiscardReason,
+    REFLEX_REQUEST_INTERVAL_MS, REFLEX_MAX_IN_FLIGHT, REFLEX_MAX_LATE_MS,
     buildPlanRequest, parsePlanDecision, sanitizePlanState, planOptions, PLAN_SLOT_MS, PLAN_HORIZON_MS, PLAN_REPLAN_MS });
 })();

@@ -5,10 +5,10 @@
   <main>
     <p class="eyebrow">TYPE SAFE DECISIONS / FLAPPY</p>
     <h1>調布祭 Flappy × Jev</h1>
-    <p class="intro">接続先とモデルを変えて、どこまで続くか試せます。</p>
+    <p class="intro">Jevがリアルタイムに操作を判断します。接続先とモデルを選んでください。</p>
     <form id="settings">
-      <label for="mode">プレイ方法</label>
-      <select id="mode"><option value="jev-plan">Jevが固定のクリック予定を選択（実験）</option><option value="jev">Jevがクリック／待機を判断（従来方式）</option><option value="local">ローカルテスト（API未使用）</option></select>
+      <label>プレイ方法</label>
+      <small>約50msごとにFLAP／WAITをJevへ問い合わせ、応答を待たず最大12件を並列処理します。Jevの選択は補正せず実行します。</small>
       <label for="endpoint">接続先URL</label>
       <input id="endpoint" type="url" value="https://api.typesafe.ai/v1/systemone" list="endpoints" spellcheck="false" required maxlength="2048">
       <datalist id="endpoints">

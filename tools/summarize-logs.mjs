@@ -19,7 +19,7 @@ if (!paths.length) {
     const log = JSON.parse((await readFile(path, "utf8")).replace(/^\uFEFF/, ""));
     if (log.format !== "chofu-jev-diagnostics-v1" || !Array.isArray(log.events)) throw new Error(`Unsupported log: ${path}`);
     if (!log.benchmark || !log.metrics) {
-      warnings.push({ file: path, reason: "v1.3.0 benchmark metadata/metrics missing; excluded to avoid mixing conditions" });
+      warnings.push({ file: path, reason: "v1.4.0 benchmark metadata/metrics missing; excluded to avoid mixing conditions" });
       continue;
     }
     const b = log.benchmark, m = log.metrics;
@@ -48,6 +48,13 @@ if (!paths.length) {
     const rows = group.metrics, games = rows.flatMap(m => m.games);
     const completed = games.filter(game => game.ended === "game_over"), stopped = games.filter(game => game.ended !== "game_over");
     const latencies = rows.flatMap(m => m.latencies_ms), delays = rows.flatMap(m => m.execution_delays_ms);
+    const reflexRows = rows.map(m => m.reflex).filter(Boolean);
+    const apiLatencies = reflexRows.flatMap(reflex => reflex.api_latencies_ms ?? []);
+    const confidences = reflexRows.flatMap(reflex => reflex.confidence_samples ?? []);
+    const failureClasses = {};
+    for (const reflex of reflexRows) for (const [name, count] of Object.entries(reflex.failure_classes ?? {})) {
+      failureClasses[name] = (failureClasses[name] ?? 0) + count;
+    }
     const activeMs = sum(rows.map(m => m.active_play_ms));
     const decisions = sum(rows.map(m => m.decisions));
     const choices = {};
@@ -73,7 +80,28 @@ if (!paths.length) {
       execution_delay_p95_ms: quantile(delays, 0.95),
       plan_underruns: sum(rows.map(m => m.plan_underruns)),
       // Includes startup without a plan, distinct from expiry count.
-      no_plan_ms: sum(rows.map(m => m.plan_gap_ms))
+      no_plan_ms: sum(rows.map(m => m.plan_gap_ms)),
+      ...(reflexRows.length ? { reflex: {
+        flap_decisions: sum(reflexRows.map(r => r.flap_decisions)),
+        wait_decisions: sum(reflexRows.map(r => r.wait_decisions)),
+        flaps_executed: sum(reflexRows.map(r => r.flaps_executed)),
+        waits_applied: sum(reflexRows.map(r => r.waits_applied)),
+        confidence_samples: confidences.length,
+        confidence_mean: confidences.length ? sum(confidences) / confidences.length : null,
+        confidence_p50: quantile(confidences, 0.5),
+        max_in_flight: Math.max(...reflexRows.map(r => r.max_observed_in_flight ?? 0)),
+        superseded_responses: sum(reflexRows.map(r => r.superseded_responses)),
+        stale_responses: sum(reflexRows.map(r => r.stale_responses)),
+        game_over_responses: sum(reflexRows.map(r => r.game_over_responses)),
+        late_decisions: sum(reflexRows.map(r => r.late_decisions)),
+        request_skips: sum(reflexRows.map(r => r.request_skips)),
+        api_errors: sum(reflexRows.map(r => r.request_errors)),
+        failure_classes: failureClasses,
+        api_latency_samples: apiLatencies.length,
+        api_latency_p50_ms: quantile(apiLatencies, 0.5),
+        api_latency_p95_ms: quantile(apiLatencies, 0.95),
+        api_latency_max_ms: apiLatencies.length ? Math.max(...apiLatencies) : null
+      } } : {})
     };
   });
   process.stdout.write(JSON.stringify({ format: "chofu-jev-benchmark-summary-v1", groups: output, warnings }, null, 2) + "\n");
