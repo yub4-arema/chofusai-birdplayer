@@ -62,21 +62,24 @@
   }
   function buildRequest(state, model) {
     return {
-      model,
-      state,
+      model, state,
       questions: {
         action: {
           type: "choice",
-          instructions: [
-            "Choose ONLY whether to click now or wait. Coordinates use y increasing downward. A negative player.velocityY means rising (UP); positive means falling (DOWN). gravity accelerates DOWNWARD. A click SETS velocity to the negative flapVelocity; it does not add an impulse. Clicking while already rising resets the full upward speed and prolongs the climb.",
-            "predicted_at_response is the estimated state when this answer arrives. predicted_if_click_until_next_decision and predicted_if_wait_until_next_decision simulate the full parabola from then until another answer could arrive. hits_upper_wall, hits_lower_wall, and hits_obstacle explicitly indicate a predicted collision during that interval; the wall margins include the player's radius, and obstacle_contacts show whether the player's full circle fits through a gap during horizontal overlap.",
-            "predicted_next_obstacle_crossings estimates the vertical path through each approaching gap. time_to_overlap_start_ms tells when the player first overlaps that obstacle horizontally; additional_decisions_before_overlap estimates how many answers can arrive before then. if_click_now shows the path if you click as this answer arrives; if_wait_then_click shows the path if you wait for one more answer and click then; if_wait_no_click shows the path if you continue without clicking. A negative upper_gap_margin_px or lower_gap_margin_px means the player hits that edge during the overlap. A negative wall margin means the path hits that wall before or during the crossing.",
-            "Compare click-now against wait-then-click at the actual gap crossing. Click now if waiting makes a safe crossing impossible but clicking now can clear it. Wait if the next answer still arrives in time and waiting preserves a safe crossing. Avoid repeated clicks when the wait path remains safe. If both paths collide, choose the one that stays in bounds and within the gap longer.",
-            "Game over occurs when the player's top goes above vertical_bounds.top_wall_y, bottom goes below vertical_bounds.bottom_wall_y, or the player hits an obstacle. vertical_bounds.safe_center_y_min and safe_center_y_max are the allowed center range including radius. gapTop and gapBottom are the opening edges; keep the whole player inside them. The extension executes your click/wait choice directly. Do not choose a route or target height, and do not give explanations."
-          ].join(" "),
+          instructions: {
+            task: "Should the player flap when this answer arrives, or wait until another answer? Choose ONLY click or wait. Predict motion and collisions yourself from the observed state, physics, boundaries, and timing. The extension executes your choice directly.",
+            rules: [
+              "Coordinates are pixels; y increases downward. velocityY is pixels/second, gravity is pixels/second squared, and negative velocityY means rising. A click SETS velocityY to flapVelocity; it does not add an impulse. Clicking while rising resets full upward speed and prolongs the climb.",
+              "Each game frame caps elapsed time at physics.maxFrameStepMs, then updates velocityY += gravity*dt and y += velocityY*dt. Obstacles move left at speedX. Game over occurs if the player's circle touches an obstacle or crosses the upper/lower wall. gapTop/gapBottom are the opening boundaries. Wall tests use player.radius; obstacle circle/rectangle tests use player.radius * physics.obstacleRadiusFactor.",
+              "player and obstacles are OBSERVED at sample time. No collision verdict, predicted position, trajectory, or target height is supplied. decision_horizon_ms estimates observation-to-answer time. Clicking happens AFTER this delay, not at the observed position. A wait leaves the player without input until the next answer; account for decision_interval_ms plus next_response_latency_ms. response_timing contains estimates, not guaranteed deadlines.",
+              "Choose the action that best preserves survival and passage through the next opening. A needless flap can push the player too high. If both choices allow a later decision safely, prefer waiting. If both are dangerous, choose the one with more time to recover. Distant obstacles can be handled by later answers.",
+              "Examples show observed-state inputs and the selected action under their estimated timing. They are fixed demonstrations, not the current game state. Infer the current decision from state, not from the example names. Do not choose a route or target height, and do not give explanations."
+            ],
+            examples: decisionExamples()
+          },
           criteria: {
-            click: "Send one flap click immediately when your response is received.",
-            wait: "Do not click before the next observation."
+            click: "Reset upward velocity once when this answer arrives, because that timing best preserves survival and reaching the opening.",
+            wait: "Leave the player without a flap until another answer, because delaying the flap best preserves survival and reaching the opening."
           }
         }
       }
@@ -84,12 +87,70 @@
   }
   function parseDecision(result) {
     const action = result?.answers?.action;
-    const confidence = action?.confidence ?? action?.answer_confidence ?? action?.probabilities?.[action?.choice] ?? null;
+    const confidence = action?.confidence ?? action?.answer_confidence ?? null;
     if (action?.type !== "choice" || !["click", "wait"].includes(action.choice) ||
         (confidence !== null && (!Number.isFinite(confidence) || confidence < 0 || confidence > 1))) {
       throw new Error("Jevの応答形式が不正です。");
     }
-    return { action: action.choice, confidence, model: String(result.model ?? "unknown").slice(0, 200) };
+    let probabilities = null;
+    if (action.probabilities !== undefined) {
+      if (!action.probabilities || typeof action.probabilities !== "object") throw new Error("Jevの選択確率が不正です。");
+      const { click, wait } = action.probabilities;
+      if (![click, wait].every(p => Number.isFinite(p) && p >= 0 && p <= 1) || Math.abs(click + wait - 1) > 0.02) {
+        throw new Error("Jevの選択確率が不正です。");
+      }
+      probabilities = { click, wait };
+    }
+    return { action: action.choice, confidence, probabilities, model: String(result.model ?? "unknown").slice(0, 200) };
+  }
+  function estimateLatency(samples) {
+    // Priors come from the 99 completed responses in the supplied v1.2.5 logs.
+    // A small prior prevents the first slow reply from becoming the sole estimate.
+    const measured = samples.filter(n => Number.isFinite(n) && n > 0).slice(-20);
+    const sorted = [180, 180, 180, 200, 270, ...measured].sort((a, b) => a - b);
+    const quantile = q => sorted[Math.ceil(sorted.length * q) - 1];
+    return {
+      typical_ms: Math.max(100, Math.min(900, quantile(0.5))),
+      cautious_ms: Math.max(270, Math.min(900, quantile(0.9))),
+      sample_count: measured.length,
+      max_observed_ms: measured.length ? Math.max(...measured) : null
+    };
+  }
+  let cachedExamples = null;
+  function decisionExamples() {
+    if (cachedExamples) return cachedExamples;
+    // These reference states were chosen using the parabola calculations documented
+    // during development. Only observed inputs and action labels go to the model.
+    const cases = [
+      ["Rising with ample room", 200, -150, null, "wait"],
+      ["Small upper clearance", 60, -150, null, "wait"],
+      ["Downward motion in the lower half", 220, 250, null, "click"],
+      ["Fast downward motion", 150, 500, null, "click"],
+      ["Approaching an elevated opening", 200, 200, [60, 180], "click"],
+      ["Approaching an opening while high", 150, -50, [100, 280], "wait"],
+      ["Approaching a wide opening", 200, 0, [120, 300], "wait"],
+      ["Downward motion close to the floor", 320, 400, null, "click"],
+      ["Upward motion close to the ceiling", 30, -270, null, "wait", 100],
+      ["An opening far ahead", 200, -150, [180, 300], "wait", 180, 700]
+    ];
+    cachedExamples = cases.map(([name, y, v, gap, action, delayMs = 180, obstacleX = 192.5]) => {
+      const seconds = delayMs / 1000;
+      const observedVelocity = v - 1500 * seconds;
+      const next = gap ? { x: obstacleX + 165 * seconds, width: 30, gapTop: gap[0], gapBottom: gap[1] } : null;
+      return {
+        name,
+        state: sanitizeState({
+          screen: { width: 672, height: 360 },
+          player: { x: 163, y: y - v * seconds + 0.5 * 1500 * seconds ** 2, radius: 13, velocityY: observedVelocity },
+          physics: { gravity: 1500, flapVelocity: -430, speedX: 165 }, next, following: null,
+          since_last_click_ms: (observedVelocity + 430) / 1500 * 1000,
+          decision_horizon_ms: delayMs, next_response_latency_ms: 270, decision_interval_ms: 20,
+          sample_age_ms: 0
+        }),
+        correct_choice: action
+      };
+    });
+    return cachedExamples;
   }
   function endpoint(value) {
     if (typeof value !== "string" || value.length > 2048) throw new Error("接続先URLを確認してください。");
@@ -114,169 +175,34 @@
       x: number(o?.x, -200, 10000), width: number(o?.width, 1, 200),
       gapTop: number(o?.gapTop, 0, 10000), gapBottom: number(o?.gapBottom, 0, 10000)
     });
-    const predicted = input.predicted_at_response;
-    if (!predicted || typeof predicted !== "object") throw new Error("ゲーム状態が不正です。");
-    const screenWidth = number(input.screen?.width, 100, 10000);
-    const screenHeight = number(input.screen?.height, 100, 10000);
-    const playerX = number(input.player?.x, 0, 10000);
-    const playerY = number(input.player?.y, 0, 10000);
-    const playerRadius = number(input.player?.radius, 1, 100);
-    const velocityY = number(input.player?.velocityY, -5000, 5000);
-    const gravity = number(input.physics?.gravity, 500, 3000);
-    const flapVelocity = number(input.physics?.flapVelocity, -1000, -100);
-    const predictedVelocityY = number(predicted.player_velocity_y, -5000, 5000);
-    const predictedY = number(predicted.player_y, -1000, 10000);
-    const clickApexY = number(predictedY - flapVelocity ** 2 / (2 * gravity), -10000, 10000);
-    const decisionHorizonMs = number(input.decision_horizon_ms, 0, 1000);
-    const decisionIntervalMs = number(input.decision_interval_ms ?? 20, 0, 1000);
-    const nextDecisionHorizonMs = decisionHorizonMs + decisionIntervalMs;
-    const speedX = number(input.physics?.speedX, 50, 500);
-    const responseObstacles = [
-      ["next", obstacle(predicted.next)], ["following", obstacle(predicted.following)]
-    ].filter(([, value]) => value !== null);
-    const noClickYAt = seconds => predictedY + predictedVelocityY * seconds + 0.5 * gravity * seconds ** 2;
-    const pathYAt = (milliseconds, clickAtMs = null) => {
-      const seconds = milliseconds / 1000;
-      if (clickAtMs === null || milliseconds < clickAtMs) return noClickYAt(seconds);
-      const clickSeconds = clickAtMs / 1000;
-      const yAtClick = noClickYAt(clickSeconds);
-      const afterClick = seconds - clickSeconds;
-      return yAtClick + flapVelocity * afterClick + 0.5 * gravity * afterClick ** 2;
-    };
-    const pathVelocityAt = (milliseconds, clickAtMs = null) => {
-      if (clickAtMs !== null && milliseconds >= clickAtMs) return flapVelocity + gravity * (milliseconds - clickAtMs) / 1000;
-      return predictedVelocityY + gravity * milliseconds / 1000;
-    };
-    const extrema = (startMs, endMs, clickAtMs = null) => {
-      const start = startMs / 1000, end = endMs / 1000;
-      const switchTime = clickAtMs === null ? Infinity : clickAtMs / 1000;
-      const cuts = [start, end];
-      if (switchTime > start && switchTime < end) cuts.push(switchTime);
-      cuts.sort((a, b) => a - b);
-      const candidates = [...cuts];
-      for (let i = 0; i < cuts.length - 1; i++) {
-        const a = cuts[i], b = cuts[i + 1], midpoint = (a + b) / 2;
-        const afterClick = switchTime !== Infinity && midpoint >= switchTime;
-        const originTime = afterClick ? switchTime : 0;
-        const originVelocity = afterClick ? flapVelocity : predictedVelocityY;
-        const apexTime = originTime - originVelocity / gravity;
-        if (apexTime >= a && apexTime <= b) candidates.push(apexTime);
-      }
-      const values = candidates.map(seconds => pathYAt(seconds * 1000, clickAtMs));
-      return { min_y: Math.min(...values), max_y: Math.max(...values) };
-    };
-    const shiftObstacle = (value, horizonMs) => value == null ? null : ({
-      ...value, x: number(value.x - speedX * horizonMs / 1000, -10000, 10000)
-    });
-    const pathSummary = clickAtMs => {
-      const duration = nextDecisionHorizonMs;
-      const vertical = extrema(0, duration, clickAtMs);
-      const upperWallMargin = vertical.min_y - playerRadius;
-      const lowerWallMargin = screenHeight - playerRadius - vertical.max_y;
-      const contacts = [];
-      for (const [which, value] of responseObstacles) {
-        const enterMs = (value.x - playerX - playerRadius) / speedX * 1000;
-        const exitMs = (value.x + value.width - playerX + playerRadius) / speedX * 1000;
-        if (exitMs < 0 || enterMs > duration) continue;
-        const startMs = Math.max(0, enterMs), endMs = Math.min(duration, exitMs);
-        if (endMs < startMs) continue;
-        const overlap = extrema(startMs, endMs, clickAtMs);
-        const upperGapMargin = overlap.min_y - (value.gapTop + playerRadius);
-        const lowerGapMargin = value.gapBottom - playerRadius - overlap.max_y;
-        contacts.push({
-          obstacle: which,
-          overlap_start_ms: number(startMs, 0, 10000),
-          overlap_end_ms: number(endMs, 0, 10000),
-          upper_gap_margin_px: number(upperGapMargin, -30000, 30000),
-          lower_gap_margin_px: number(lowerGapMargin, -30000, 30000),
-          hits_upper_gap: upperGapMargin < 0,
-          hits_lower_gap: lowerGapMargin < 0
-        });
-      }
-      const endY = pathYAt(duration, clickAtMs), endVelocityY = pathVelocityAt(duration, clickAtMs);
-      return {
-        additional_horizon_ms: duration,
-        player_y: number(endY, -30000, 30000),
-        player_velocity_y: number(endVelocityY, -10000, 10000),
-        vertical_direction: endVelocityY < 0 ? "up" : "down",
-        upper_wall_margin_px: number(upperWallMargin, -30000, 30000),
-        lower_wall_margin_px: number(lowerWallMargin, -30000, 30000),
-        hits_upper_wall: upperWallMargin < 0,
-        hits_lower_wall: lowerWallMargin < 0,
-        hits_obstacle: contacts.some(contact => contact.hits_upper_gap || contact.hits_lower_gap),
-        obstacle_contacts: contacts,
-        next: shiftObstacle(responseObstacles.find(([which]) => which === "next")?.[1] ?? null, duration),
-        following: shiftObstacle(responseObstacles.find(([which]) => which === "following")?.[1] ?? null, duration)
-      };
-    };
-    const crossingForecast = (which, value) => {
-      const rawEntryMs = (value.x - playerX - playerRadius) / speedX * 1000;
-      const rawExitMs = (value.x + value.width - playerX + playerRadius) / speedX * 1000;
-      if (rawExitMs < 0 || rawEntryMs > 5000) return null;
-      const startMs = Math.max(0, rawEntryMs), endMs = Math.max(startMs, rawExitMs);
-      const pathAtCrossing = clickAtMs => {
-        const overlap = extrema(startMs, endMs, clickAtMs);
-        const entire = extrema(0, endMs, clickAtMs);
-        const upperGapMargin = overlap.min_y - (value.gapTop + playerRadius);
-        const lowerGapMargin = value.gapBottom - playerRadius - overlap.max_y;
-        const upperWallMargin = entire.min_y - playerRadius;
-        const lowerWallMargin = screenHeight - playerRadius - entire.max_y;
-        return {
-          player_y_at_overlap_start: number(pathYAt(startMs, clickAtMs), -30000, 30000),
-          player_y_at_overlap_end: number(pathYAt(endMs, clickAtMs), -30000, 30000),
-          upper_gap_margin_px: number(upperGapMargin, -30000, 30000),
-          lower_gap_margin_px: number(lowerGapMargin, -30000, 30000),
-          hits_upper_gap: upperGapMargin < 0,
-          hits_lower_gap: lowerGapMargin < 0,
-          upper_wall_margin_before_crossing_px: number(upperWallMargin, -30000, 30000),
-          lower_wall_margin_before_crossing_px: number(lowerWallMargin, -30000, 30000),
-          hits_wall_before_or_during_crossing: upperWallMargin < 0 || lowerWallMargin < 0
-        };
-      };
-      return {
-        obstacle: which,
-        time_to_overlap_start_ms: number(startMs, 0, 10000),
-        time_to_overlap_end_ms: number(endMs, 0, 10000),
-        additional_decisions_before_overlap: Math.max(0, Math.ceil(startMs / Math.max(1, nextDecisionHorizonMs)) - 1),
-        gapTop: value.gapTop,
-        gapBottom: value.gapBottom,
-        if_click_now: pathAtCrossing(0),
-        if_wait_then_click: pathAtCrossing(nextDecisionHorizonMs),
-        if_wait_no_click: pathAtCrossing(null)
-      };
-    };
-    const waitPath = pathSummary(null);
-    const clickPath = pathSummary(0);
-    const crossings = responseObstacles.map(([which, value]) => crossingForecast(which, value)).filter(Boolean);
+    const height = number(input.screen?.height, 100, 10000);
+    const horizon = number(input.decision_horizon_ms, 0, 1500);
     return {
-      screen: { width: screenWidth, height: screenHeight },
-      player: { x: playerX, y: playerY, radius: playerRadius, velocityY,
-        vertical_direction: velocityY < 0 ? "up" : "down" },
-      physics: { gravity, flapVelocity, speedX },
+      protocol: "observed-state-v1",
+      screen: { width: number(input.screen?.width, 100, 10000), height },
+      player: {
+        x: number(input.player?.x, 0, 10000), y: number(input.player?.y, 0, 10000),
+        radius: number(input.player?.radius, 1, 100), velocityY: number(input.player?.velocityY, -5000, 5000)
+      },
+      physics: {
+        gravity: number(input.physics?.gravity, 500, 3000),
+        flapVelocity: number(input.physics?.flapVelocity, -1000, -100),
+        speedX: number(input.physics?.speedX, 50, 500), maxFrameStepMs: 50, obstacleRadiusFactor: 0.9
+      },
       next: obstacle(input.next), following: obstacle(input.following),
-      vertical_bounds: {
-        top_wall_y: 0,
-        bottom_wall_y: screenHeight,
-        safe_center_y_min: playerRadius,
-        safe_center_y_max: screenHeight - playerRadius
-      },
+      vertical_bounds: { top_wall_y: 0, bottom_wall_y: height },
       since_last_click_ms: number(input.since_last_click_ms, 0, 100000),
-      decision_horizon_ms: decisionHorizonMs,
-      decision_interval_ms: decisionIntervalMs,
-      sample_age_ms: number(input.sample_age_ms ?? 0, 0, 1000),
-      predicted_at_response: {
-        player_y: predictedY,
-        player_velocity_y: predictedVelocityY,
-        vertical_direction: predictedVelocityY < 0 ? "up" : "down",
-        estimated_click_apex_y_if_clicked_now: clickApexY,
-        estimated_click_upper_wall_margin_px: number(clickApexY - playerRadius, -10000, 10000),
-        next: responseObstacles.find(([which]) => which === "next")?.[1] ?? null,
-        following: responseObstacles.find(([which]) => which === "following")?.[1] ?? null
-      },
-      predicted_if_click_until_next_decision: clickPath,
-      predicted_if_wait_until_next_decision: waitPath,
-      predicted_next_obstacle_crossings: crossings
+      decision_horizon_ms: horizon,
+      next_response_latency_ms: number(input.next_response_latency_ms ?? horizon, 0, 1500),
+      response_timing: input.response_timing ? {
+        typical_ms: number(input.response_timing.typical_ms, 100, 900),
+        cautious_ms: number(input.response_timing.cautious_ms, 100, 900),
+        sample_count: number(input.response_timing.sample_count, 0, 20),
+        max_observed_ms: input.response_timing.max_observed_ms === null ? null : number(input.response_timing.max_observed_ms, 0, 10000)
+      } : null,
+      decision_interval_ms: number(input.decision_interval_ms ?? 20, 0, 1000),
+      sample_age_ms: number(input.sample_age_ms ?? 0, 0, 1000)
     };
   }
-  globalThis.ChofuJev = Object.freeze({ observe, flapNeeded, buildRequest, parseDecision, sanitizeState, endpoint, originPattern });
+  globalThis.ChofuJev = Object.freeze({ observe, flapNeeded, buildRequest, parseDecision, sanitizeState, estimateLatency, endpoint, originPattern });
 })();

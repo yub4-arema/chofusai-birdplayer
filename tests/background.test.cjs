@@ -68,12 +68,12 @@ test('API request matches official contract and drops page properties; budget is
     const body = JSON.parse(options.body);
     assert.equal(body.model, 'jev-latest'); assert.equal(body.questions.action.type, 'choice');
     assert.deepEqual(body.questions.action.criteria, {
-      click: 'Send one flap click immediately when your response is received.',
-      wait: 'Do not click before the next observation.'
+      click: 'Reset upward velocity once when this answer arrives, because that timing best preserves survival and reaching the opening.',
+      wait: 'Leave the player without a flap until another answer, because delaying the flap best preserves survival and reaching the opening.'
     });
     assert.equal(body.state.pageText, undefined);
     assert.equal(body.state.next.id, undefined);
-    assert.equal(body.state.predicted_at_response.player_y, 233);
+    assert.equal(body.state.predicted_at_response, undefined);
     return new Response(JSON.stringify(result), { status: 200 });
   };
   const answer = await handle({ type: 'decide', id: run.id, state }, game);

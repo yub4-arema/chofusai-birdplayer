@@ -1,0 +1,382 @@
+[
+  {
+    "name": "Rising with ample room",
+    "state": {
+      "protocol": "observed-state-v1",
+      "screen": {
+        "width": 672,
+        "height": 360
+      },
+      "player": {
+        "x": 163,
+        "y": 251.3,
+        "radius": 13,
+        "velocityY": -420
+      },
+      "physics": {
+        "gravity": 1500,
+        "flapVelocity": -430,
+        "speedX": 165,
+        "maxFrameStepMs": 50,
+        "obstacleRadiusFactor": 0.9
+      },
+      "next": null,
+      "following": null,
+      "vertical_bounds": {
+        "top_wall_y": 0,
+        "bottom_wall_y": 360
+      },
+      "since_last_click_ms": 6.67,
+      "decision_horizon_ms": 180,
+      "next_response_latency_ms": 270,
+      "response_timing": null,
+      "decision_interval_ms": 20,
+      "sample_age_ms": 0
+    },
+    "correct_choice": "wait"
+  },
+  {
+    "name": "Small upper clearance",
+    "state": {
+      "protocol": "observed-state-v1",
+      "screen": {
+        "width": 672,
+        "height": 360
+      },
+      "player": {
+        "x": 163,
+        "y": 111.3,
+        "radius": 13,
+        "velocityY": -420
+      },
+      "physics": {
+        "gravity": 1500,
+        "flapVelocity": -430,
+        "speedX": 165,
+        "maxFrameStepMs": 50,
+        "obstacleRadiusFactor": 0.9
+      },
+      "next": null,
+      "following": null,
+      "vertical_bounds": {
+        "top_wall_y": 0,
+        "bottom_wall_y": 360
+      },
+      "since_last_click_ms": 6.67,
+      "decision_horizon_ms": 180,
+      "next_response_latency_ms": 270,
+      "response_timing": null,
+      "decision_interval_ms": 20,
+      "sample_age_ms": 0
+    },
+    "correct_choice": "wait"
+  },
+  {
+    "name": "Downward motion in the lower half",
+    "state": {
+      "protocol": "observed-state-v1",
+      "screen": {
+        "width": 672,
+        "height": 360
+      },
+      "player": {
+        "x": 163,
+        "y": 199.3,
+        "radius": 13,
+        "velocityY": -20
+      },
+      "physics": {
+        "gravity": 1500,
+        "flapVelocity": -430,
+        "speedX": 165,
+        "maxFrameStepMs": 50,
+        "obstacleRadiusFactor": 0.9
+      },
+      "next": null,
+      "following": null,
+      "vertical_bounds": {
+        "top_wall_y": 0,
+        "bottom_wall_y": 360
+      },
+      "since_last_click_ms": 273.33,
+      "decision_horizon_ms": 180,
+      "next_response_latency_ms": 270,
+      "response_timing": null,
+      "decision_interval_ms": 20,
+      "sample_age_ms": 0
+    },
+    "correct_choice": "click"
+  },
+  {
+    "name": "Fast downward motion",
+    "state": {
+      "protocol": "observed-state-v1",
+      "screen": {
+        "width": 672,
+        "height": 360
+      },
+      "player": {
+        "x": 163,
+        "y": 84.3,
+        "radius": 13,
+        "velocityY": 230
+      },
+      "physics": {
+        "gravity": 1500,
+        "flapVelocity": -430,
+        "speedX": 165,
+        "maxFrameStepMs": 50,
+        "obstacleRadiusFactor": 0.9
+      },
+      "next": null,
+      "following": null,
+      "vertical_bounds": {
+        "top_wall_y": 0,
+        "bottom_wall_y": 360
+      },
+      "since_last_click_ms": 440,
+      "decision_horizon_ms": 180,
+      "next_response_latency_ms": 270,
+      "response_timing": null,
+      "decision_interval_ms": 20,
+      "sample_age_ms": 0
+    },
+    "correct_choice": "click"
+  },
+  {
+    "name": "Approaching an elevated opening",
+    "state": {
+      "protocol": "observed-state-v1",
+      "screen": {
+        "width": 672,
+        "height": 360
+      },
+      "player": {
+        "x": 163,
+        "y": 188.3,
+        "radius": 13,
+        "velocityY": -70
+      },
+      "physics": {
+        "gravity": 1500,
+        "flapVelocity": -430,
+        "speedX": 165,
+        "maxFrameStepMs": 50,
+        "obstacleRadiusFactor": 0.9
+      },
+      "next": {
+        "x": 222.2,
+        "width": 30,
+        "gapTop": 60,
+        "gapBottom": 180
+      },
+      "following": null,
+      "vertical_bounds": {
+        "top_wall_y": 0,
+        "bottom_wall_y": 360
+      },
+      "since_last_click_ms": 240,
+      "decision_horizon_ms": 180,
+      "next_response_latency_ms": 270,
+      "response_timing": null,
+      "decision_interval_ms": 20,
+      "sample_age_ms": 0
+    },
+    "correct_choice": "click"
+  },
+  {
+    "name": "Approaching an opening while high",
+    "state": {
+      "protocol": "observed-state-v1",
+      "screen": {
+        "width": 672,
+        "height": 360
+      },
+      "player": {
+        "x": 163,
+        "y": 183.3,
+        "radius": 13,
+        "velocityY": -320
+      },
+      "physics": {
+        "gravity": 1500,
+        "flapVelocity": -430,
+        "speedX": 165,
+        "maxFrameStepMs": 50,
+        "obstacleRadiusFactor": 0.9
+      },
+      "next": {
+        "x": 222.2,
+        "width": 30,
+        "gapTop": 100,
+        "gapBottom": 280
+      },
+      "following": null,
+      "vertical_bounds": {
+        "top_wall_y": 0,
+        "bottom_wall_y": 360
+      },
+      "since_last_click_ms": 73.33,
+      "decision_horizon_ms": 180,
+      "next_response_latency_ms": 270,
+      "response_timing": null,
+      "decision_interval_ms": 20,
+      "sample_age_ms": 0
+    },
+    "correct_choice": "wait"
+  },
+  {
+    "name": "Approaching a wide opening",
+    "state": {
+      "protocol": "observed-state-v1",
+      "screen": {
+        "width": 672,
+        "height": 360
+      },
+      "player": {
+        "x": 163,
+        "y": 224.3,
+        "radius": 13,
+        "velocityY": -270
+      },
+      "physics": {
+        "gravity": 1500,
+        "flapVelocity": -430,
+        "speedX": 165,
+        "maxFrameStepMs": 50,
+        "obstacleRadiusFactor": 0.9
+      },
+      "next": {
+        "x": 222.2,
+        "width": 30,
+        "gapTop": 120,
+        "gapBottom": 300
+      },
+      "following": null,
+      "vertical_bounds": {
+        "top_wall_y": 0,
+        "bottom_wall_y": 360
+      },
+      "since_last_click_ms": 106.67,
+      "decision_horizon_ms": 180,
+      "next_response_latency_ms": 270,
+      "response_timing": null,
+      "decision_interval_ms": 20,
+      "sample_age_ms": 0
+    },
+    "correct_choice": "wait"
+  },
+  {
+    "name": "Downward motion close to the floor",
+    "state": {
+      "protocol": "observed-state-v1",
+      "screen": {
+        "width": 672,
+        "height": 360
+      },
+      "player": {
+        "x": 163,
+        "y": 272.3,
+        "radius": 13,
+        "velocityY": 130
+      },
+      "physics": {
+        "gravity": 1500,
+        "flapVelocity": -430,
+        "speedX": 165,
+        "maxFrameStepMs": 50,
+        "obstacleRadiusFactor": 0.9
+      },
+      "next": null,
+      "following": null,
+      "vertical_bounds": {
+        "top_wall_y": 0,
+        "bottom_wall_y": 360
+      },
+      "since_last_click_ms": 373.33,
+      "decision_horizon_ms": 180,
+      "next_response_latency_ms": 270,
+      "response_timing": null,
+      "decision_interval_ms": 20,
+      "sample_age_ms": 0
+    },
+    "correct_choice": "click"
+  },
+  {
+    "name": "Upward motion close to the ceiling",
+    "state": {
+      "protocol": "observed-state-v1",
+      "screen": {
+        "width": 672,
+        "height": 360
+      },
+      "player": {
+        "x": 163,
+        "y": 64.5,
+        "radius": 13,
+        "velocityY": -420
+      },
+      "physics": {
+        "gravity": 1500,
+        "flapVelocity": -430,
+        "speedX": 165,
+        "maxFrameStepMs": 50,
+        "obstacleRadiusFactor": 0.9
+      },
+      "next": null,
+      "following": null,
+      "vertical_bounds": {
+        "top_wall_y": 0,
+        "bottom_wall_y": 360
+      },
+      "since_last_click_ms": 6.67,
+      "decision_horizon_ms": 100,
+      "next_response_latency_ms": 270,
+      "response_timing": null,
+      "decision_interval_ms": 20,
+      "sample_age_ms": 0
+    },
+    "correct_choice": "wait"
+  },
+  {
+    "name": "An opening far ahead",
+    "state": {
+      "protocol": "observed-state-v1",
+      "screen": {
+        "width": 672,
+        "height": 360
+      },
+      "player": {
+        "x": 163,
+        "y": 251.3,
+        "radius": 13,
+        "velocityY": -420
+      },
+      "physics": {
+        "gravity": 1500,
+        "flapVelocity": -430,
+        "speedX": 165,
+        "maxFrameStepMs": 50,
+        "obstacleRadiusFactor": 0.9
+      },
+      "next": {
+        "x": 729.7,
+        "width": 30,
+        "gapTop": 180,
+        "gapBottom": 300
+      },
+      "following": null,
+      "vertical_bounds": {
+        "top_wall_y": 0,
+        "bottom_wall_y": 360
+      },
+      "since_last_click_ms": 6.67,
+      "decision_horizon_ms": 180,
+      "next_response_latency_ms": 270,
+      "response_timing": null,
+      "decision_interval_ms": 20,
+      "sample_age_ms": 0
+    },
+    "correct_choice": "wait"
+  }
+]

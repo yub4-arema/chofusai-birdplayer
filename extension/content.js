@@ -32,7 +32,8 @@
   const DECISION_INTERVAL_MS = 20, MAX_ACTION_LATENCY_MS = 900;
   const LOG_INTERVAL_MS = 50, MAX_LOG_EVENTS = 2400;
   let running = false, generation = 0, timer = null, session = null, prefs = null;
-  let last = null, lastFlap = 0, pending = false, nextDecisionAt = 0;
+  let last = null, lastFlap = 0, motionVelocity = null, pending = false, nextDecisionAt = 0;
+  let latencySamples = [];
   let requests = 0, decisions = 0, lastLatency = null, restartAt = null;
   let diagnosticEvents = [], runStartedAt = null, runStartedWall = null, lastLoggedAt = -Infinity, attemptNumber = 0;
   let diagnosticsTruncated = false, gameOverLogged = false;
@@ -53,7 +54,7 @@
     record("stop", { reason, score: score(), pending });
     generation++;
     running = false;
-    clearTimeout(timer); timer = null;
+    cancelAnimationFrame(timer); timer = null;
     last = null; pending = false; nextDecisionAt = 0;
     controls(); message.textContent = reason; showStats();
     send({ type: "run:stop" }).catch(() => {});
@@ -61,9 +62,10 @@
   function flap(source = "local") {
     stage.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, cancelable: true, pointerType: "mouse", button: 0, buttons: 1 }));
     lastFlap = performance.now();
+    motionVelocity = -430 * (last?.frame.scale ?? Math.max(0.7, Math.min(1.15, stage.clientHeight / 360)));
     record("click", { source, score: score() });
   }
-  function resetTracking() { last = null; pending = false; nextDecisionAt = 0; restartAt = null; }
+  function resetTracking() { last = null; motionVelocity = null; pending = false; nextDecisionAt = 0; restartAt = null; }
   async function start() {
     if (running) return { ok: true };
     const epoch = ++generation;
@@ -73,6 +75,7 @@
       if (epoch !== generation) return { ok: false, error: "開始をキャンセルしました。" };
       if (!response.ok) throw new Error(response.error);
       session = response.id; prefs = response.config; requests = 0; decisions = 0; lastLatency = null;
+      latencySamples = [];
       bestKey = `chofu-jev-best:${prefs.mode === "local" ? "local" : `${prefs.endpoint}|${prefs.model}`}`;
       best = 0;
       try { best = Number(localStorage.getItem(bestKey) || 0) || 0; } catch {}
@@ -91,7 +94,7 @@
       });
       if (restart) { restart.click(); lastFlap = performance.now(); record("restart", { source: "start" }); } else flap("start");
       message.textContent = prefs.mode === "jev" ? `${prefs.model}がクリックか待機を判断しています。` : "ローカルテスト中（Jev APIは使用していません）。";
-      timer = setTimeout(tick, 20); showStats();
+      timer = requestAnimationFrame(tick); showStats();
       return { ok: true };
     } catch (error) {
       if (epoch === generation) stop(error.message);
@@ -100,15 +103,14 @@
   }
   function decisionState(frame, velocity, sampledAt) {
     const sampleAge = Math.max(0, performance.now() - sampledAt);
-    const horizon = Math.max(100, Math.min(750, (lastLatency ?? 250) + sampleAge));
-    const seconds = horizon / 1000;
+    const timing = ChofuJev.estimateLatency(latencySamples);
+    const horizon = timing.typical_ms + sampleAge;
     const gravity = 1500 * frame.scale, speedX = 165 * frame.scale;
     const thresholdX = frame.player.x - frame.player.radius;
     const upcoming = frame.obstacles
       .filter(obstacle => obstacle.x + obstacle.width >= thresholdX)
       .sort((a, b) => a.x - b.x)
       .slice(0, 2);
-    const project = obstacle => obstacle ? { ...obstacle, x: obstacle.x - speedX * seconds } : null;
     return {
       screen: { width: frame.width, height: frame.height },
       player: { ...frame.player, velocityY: velocity },
@@ -117,14 +119,10 @@
       following: upcoming[1] ?? null,
       since_last_click_ms: Math.max(0, sampledAt - lastFlap),
       decision_horizon_ms: horizon,
+      next_response_latency_ms: timing.cautious_ms,
+      response_timing: timing,
       decision_interval_ms: DECISION_INTERVAL_MS,
-      sample_age_ms: sampleAge,
-      predicted_at_response: {
-        player_y: frame.player.y + velocity * seconds + 0.5 * gravity * seconds ** 2,
-        player_velocity_y: velocity + gravity * seconds,
-        next: project(upcoming[0]),
-        following: project(upcoming[1])
-      }
+      sample_age_ms: sampleAge
     };
   }
   async function ask(frame, velocity, sampledAt) {
@@ -140,13 +138,23 @@
       const response = await send({ type: "decide", id: session, state });
       if (epoch !== generation || !running) return;
       if (!response.ok) throw new Error(response.error);
+      const elapsed = performance.now() - requestStartedAt;
       requests = response.requests; lastLatency = response.latencyMs;
+      latencySamples.push(elapsed);
+      if (latencySamples.length > 20) latencySamples.shift();
+      const observation = last ? {
+        sampled_at_ms: Math.round((last.time - runStartedAt) * 100) / 100,
+        age_ms: Math.round((performance.now() - last.time) * 100) / 100,
+        player_y: last.y, player_velocity_y: Math.round(last.velocity * 100) / 100,
+        predicted_y_at_same_sample: Math.round((state.player.y + state.player.velocityY * (last.time - sampledAt) / 1000 + 0.5 * state.physics.gravity * ((last.time - sampledAt) / 1000) ** 2) * 100) / 100
+      } : null;
       record("response", {
         attempt, action: response.action, confidence: response.confidence,
+        probabilities: response.probabilities,
         model: response.model, api_latency_ms: response.latencyMs,
-        end_to_end_ms: Math.round(performance.now() - requestStartedAt), requests
+        end_to_end_ms: Math.round(elapsed), requests, observation_at_response: observation
       });
-      if (response.latencyMs > MAX_ACTION_LATENCY_MS) {
+      if (elapsed > MAX_ACTION_LATENCY_MS) {
         stop(`Jevの応答が${MAX_ACTION_LATENCY_MS}msを超えたため、古い判断を実行せず停止しました。`);
         return;
       }
@@ -168,7 +176,7 @@
       }
     }
   }
-  function tick() {
+  function tick(frameAt) {
     if (!running) return;
     try {
       if (!stage.isConnected || !canvas.isConnected) { stop("ゲームが見つからなくなったため停止しました。"); return; }
@@ -192,21 +200,32 @@
         if (now >= restartAt && !pending) {
           game.querySelector('[data-action="restart"]')?.click(); lastFlap = now; record("restart", { source: "auto", score: currentScore }); resetTracking(); gameOverLogged = false;
         }
-        timer = setTimeout(tick, 20); return;
+        timer = requestAnimationFrame(tick); return;
       }
-      const sampledAt = performance.now();
+      // The game's rAF callback draws before ours, with this same timestamp.
+      // Its semi-implicit Euler update is v += g*dt; y += v*dt, with dt capped at 50ms.
+      const sampledAt = frameAt;
       const frame = ChofuJev.observe(ctx.getImageData(0, 0, canvas.width, canvas.height), rect.width, rect.height);
       if (!frame) { stop("赤いプレイヤーを読み取れませんでした。ページを再読み込みしてください。"); return; }
-      const dt = last ? (sampledAt - last.time) / 1000 : 0;
-      const velocitySource = last && dt > 0 && dt < 0.2 ? "frame-delta" : "physics-since-click";
-      let velocity = velocitySource === "frame-delta"
-        ? (frame.player.y - last.y) / dt
-        : -430 * frame.scale + 1500 * frame.scale * Math.max(0, (sampledAt - lastFlap) / 1000);
-      velocity = Math.max(-500 * frame.scale, Math.min(1000 * frame.scale, velocity));
+      const dt = Math.max(0, Math.min(0.05, (sampledAt - (last?.time ?? lastFlap)) / 1000));
+      motionVelocity ??= -430 * frame.scale;
+      motionVelocity += 1500 * frame.scale * dt;
+      if (!last) {
+        // On the first run the game may reuse its idle animation clock.
+        // Recover that first capped step from its known restart position and Euler update.
+        const gravity = 1500 * frame.scale, flapVelocity = -430 * frame.scale;
+        const discriminant = flapVelocity ** 2 + 4 * gravity * (frame.player.y - frame.height / 2);
+        const firstStep = discriminant >= 0 ? (-flapVelocity - Math.sqrt(discriminant)) / (2 * gravity) : -1;
+        if (firstStep >= 0 && firstStep <= 0.051) motionVelocity = flapVelocity + gravity * Math.min(0.05, firstStep);
+      }
+      const velocity = motionVelocity;
+      const displacementError = last ? frame.player.y - (last.y + velocity * dt) : null;
       if (sampledAt - lastLoggedAt >= LOG_INTERVAL_MS) {
         record("observation", {
-          score: currentScore, pending, velocity_source: velocitySource,
-          sampled_at_ms: Math.round(sampledAt - runStartedAt),
+          score: currentScore, pending, velocity_source: "game-frame-physics",
+          frame_dt_ms: Math.round(dt * 100000) / 100,
+          displacement_error_px: displacementError === null ? null : Math.round(displacementError * 100) / 100,
+          sampled_at_ms: Math.round((sampledAt - runStartedAt) * 100) / 100,
           sample_age_ms: Math.round((performance.now() - sampledAt) * 100) / 100,
           screen: { width: frame.width, height: frame.height, scale: frame.scale },
           player: { ...frame.player, velocityY: Math.round(velocity * 100) / 100 },
@@ -214,6 +233,7 @@
         });
         lastLoggedAt = sampledAt;
       }
+      last = { time: sampledAt, y: frame.player.y, velocity, frame };
       if (prefs.mode === "jev") {
         if (!pending && performance.now() >= nextDecisionAt) void ask(frame, velocity, sampledAt);
       } else {
@@ -221,8 +241,7 @@
         const target = next ? (next.gapTop + next.gapBottom) / 2 : frame.height / 2;
         if (ChofuJev.flapNeeded(frame, target, velocity, sampledAt - lastFlap)) flap();
       }
-      last = { time: sampledAt, y: frame.player.y };
-      showStats(); timer = setTimeout(tick, 20);
+      showStats(); timer = requestAnimationFrame(tick);
     } catch (error) { stop(`読み取りエラー：${error.message}`); }
   }
   startButton.addEventListener("click", () => void start());
