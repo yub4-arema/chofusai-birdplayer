@@ -1,6 +1,6 @@
 "use strict";
 importScripts("core.js");
-const defaults = { mode: "jev", endpoint: "https://api.typesafe.ai/v1/systemone", model: "jev-latest", maxRequests: 200, autoRestart: false };
+const defaults = { mode: "jev-plan", endpoint: "https://api.typesafe.ai/v1/systemone", model: "jev-latest", maxRequests: 200, autoRestart: false };
 const sessions = new Map();
 const ready = (async () => {
   await Promise.all([
@@ -52,10 +52,10 @@ async function handle(message, sender) {
   }
   if (message?.type === "config:save" && isPopup(sender)) {
     const prefs = message.config;
-    if (!["jev", "local"].includes(prefs?.mode) || !/^[a-zA-Z0-9][a-zA-Z0-9._:/@+-]{0,199}$/.test(prefs.model) ||
+    if (!["jev-plan", "jev", "local"].includes(prefs?.mode) || !/^[a-zA-Z0-9][a-zA-Z0-9._:/@+-]{0,199}$/.test(prefs.model) ||
         !Number.isInteger(prefs.maxRequests) || prefs.maxRequests < 1 || prefs.maxRequests > 1000) throw new Error("設定値を確認してください。");
     const endpoint = ChofuJev.endpoint(prefs.endpoint ?? defaults.endpoint);
-    if (endpoint !== defaults.endpoint && prefs.mode === "jev" && !await chrome.permissions.contains({ origins: [ChofuJev.originPattern(endpoint)] })) throw new Error("接続先へのアクセスを許可してください。");
+    if (endpoint !== defaults.endpoint && prefs.mode !== "local" && !await chrome.permissions.contains({ origins: [ChofuJev.originPattern(endpoint)] })) throw new Error("接続先へのアクセスを許可してください。");
     if (message.apiKey !== undefined && (typeof message.apiKey !== "string" || message.apiKey.length > 512)) throw new Error("APIキーを確認してください。");
     const previous = await config();
     if (previous.endpoint !== endpoint || previous.model !== prefs.model || previous.mode !== prefs.mode) for (const id of [...sessions.keys()]) end(id);
@@ -78,7 +78,7 @@ async function handle(message, sender) {
     try {
       const prefs = await config();
       if (sessions.get(tabId) !== starting) throw new Error("開始をキャンセルしました。");
-      if (prefs.mode === "jev" && new URL(prefs.endpoint).origin === "https://api.typesafe.ai" && !prefs.hasKey) throw new Error("拡張機能でTypeSafe APIキーを設定してください。");
+      if (prefs.mode !== "local" && new URL(prefs.endpoint).origin === "https://api.typesafe.ai" && !prefs.hasKey) throw new Error("拡張機能でTypeSafe APIキーを設定してください。");
       starting.prefs = prefs;
       return { ok: true, id, config: prefs };
     } catch (error) {
@@ -93,10 +93,11 @@ async function handle(message, sender) {
   }
   const session = sessions.get(tabId);
   if (!session || message.id !== session.id) throw new Error("セッションが終了しました。もう一度開始してください。");
-  if (message.type !== "decide" || session.prefs.mode !== "jev") throw new Error("操作が不正です。");
+  if (message.type !== "decide" || !["jev-plan", "jev"].includes(session.prefs.mode)) throw new Error("操作が不正です。");
   if (session.controller) throw new Error("Jevに問い合わせ中です。");
   if (session.count >= session.prefs.maxRequests) throw new Error("設定したAPI呼び出し上限に達しました。");
-  const state = ChofuJev.sanitizeState(message.state);
+  const planned = session.prefs.mode === "jev-plan";
+  const state = planned ? ChofuJev.sanitizePlanState(message.state) : ChofuJev.sanitizeState(message.state);
   const controller = new AbortController();
   session.controller = controller;
   let timer;
@@ -116,7 +117,7 @@ async function handle(message, sender) {
     if (session.prefs.endpoint !== defaults.endpoint && !await chrome.permissions.contains({ origins: [ChofuJev.originPattern(session.prefs.endpoint)] })) throw new Error("接続先へのアクセス権がありません。");
     if (sessions.get(tabId) !== session) throw new Error("セッションが終了しました。");
     session.count++;
-    const body = JSON.stringify(ChofuJev.buildRequest(state, session.prefs.model));
+    const body = JSON.stringify(planned ? ChofuJev.buildPlanRequest(state, session.prefs.model) : ChofuJev.buildRequest(state, session.prefs.model));
     progress("request_prepared", { body_bytes: new TextEncoder().encode(body).byteLength });
     timer = setTimeout(() => { timedOut = true; controller.abort(); }, 2500);
     progress("fetch_started");
@@ -133,7 +134,7 @@ async function handle(message, sender) {
     }
     const result = await response.json();
     progress("body_received");
-    const decision = ChofuJev.parseDecision(result);
+    const decision = planned ? ChofuJev.parsePlanDecision(result) : ChofuJev.parseDecision(result);
     if (sessions.get(tabId) !== session) throw new Error("セッションが終了しました。");
     progress("decision_parsed");
     return { ok: true, ...decision, latencyMs: Math.round(performance.now() - started), requests: session.count };

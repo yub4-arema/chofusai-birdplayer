@@ -119,6 +119,77 @@
     }
     return { action: action.choice, confidence, probabilities, model: String(result.model ?? "unknown").slice(0, 200) };
   }
+  const PLAN_SLOT_MS = 200, PLAN_HORIZON_MS = 800, PLAN_REPLAN_MS = 400;
+  const planOptions = Object.freeze(Object.fromEntries(Array.from({ length: 16 }, (_, mask) => {
+    const offsets = Array.from({ length: 4 }, (_, slot) => slot * PLAN_SLOT_MS).filter((_, slot) => mask & (1 << slot));
+    return [offsets.length ? `click_${offsets.join("_")}` : "wait_all", Object.freeze(offsets)];
+  })));
+  function sanitizePlanState(input) {
+    const state = sanitizeState(input);
+    const queued = input?.planning?.pending_clicks_ms;
+    const remaining = input?.planning?.current_plan_remaining_ms;
+    if (!Array.isArray(queued) || queued.length > 4 ||
+        queued.some((n, index) => !Number.isFinite(n) || n < 0 || n > PLAN_HORIZON_MS || (index > 0 && n <= queued[index - 1])) ||
+        !Number.isFinite(remaining) || remaining < 0 || remaining > PLAN_HORIZON_MS) {
+      throw new Error("クリック予定の状態が不正です。");
+    }
+    return {
+      ...state, protocol: "scheduled-observed-state-v1",
+      planning: {
+        horizon_ms: PLAN_HORIZON_MS, slot_ms: PLAN_SLOT_MS, replan_after_ms: PLAN_REPLAN_MS,
+        pending_clicks_ms: queued.map(n => Math.round(n * 100) / 100),
+        current_plan_remaining_ms: Math.round(remaining * 100) / 100
+      }
+    };
+  }
+  function buildPlanRequest(state, model) {
+    return {
+      model, state,
+      questions: {
+        plan: {
+          type: "choice",
+          instructions: {
+            task: "Select the complete click schedule for the 800ms AFTER this answer arrives. Predict motion and collisions yourself. Select one option; the extension executes exactly those clicks, and replans while executing the schedule.",
+            rules: [
+              "Coordinates are pixels; y increases downward. velocityY is pixels/second; gravity is pixels/second squared. A click SETS velocityY to flapVelocity, restarting full upward speed. Each frame caps dt at maxFrameStepMs, then does velocityY += gravity*dt; y += velocityY*dt. Obstacles move left at speedX.",
+              "Survive the upper/lower walls and pass through openings. Walls use player.radius; obstacle circle/rectangle contact uses player.radius * obstacleRadiusFactor. A lower opening may require falling rather than another flap. Repeated flaps while rising can cause an upper collision.",
+              "The state is observed BEFORE the response delay. decision_horizon_ms estimates this delay; response_timing describes uncertainty. Before this answer arrives, the existing pending_clicks_ms schedule continues. Those times are relative to the observed sample. Include those possible clicks in your reasoning about the state at answer time.",
+              "When this answer arrives, all remaining old scheduled clicks are cancelled and your selected schedule starts from that arrival time. The option's click_offsets_ms are relative to ANSWER ARRIVAL, not the observed sample. 0 means the next animation frame; 200, 400 and 600 mean clicks at those offsets. Empty means no clicks. Do not assume earlier pending clicks survive this replacement.",
+              "The next request is sent 400ms after this schedule starts, and the old schedule keeps running during that inference. Choose the entire schedule for the full 800ms, even if a later answer may replace its remaining clicks. Once a schedule expires, there are no clicks until another answer arrives. Do not rely on another response arriving in time to rescue an unsafe schedule. Prefer fewer clicks when equally safe. If every schedule is dangerous, choose the one with the best chance to survive.",
+              "Only observed coordinates, physics, timing and already-selected scheduled actions are supplied. No predicted position, trajectory, collision verdict, safety margin or local action recommendation is supplied."
+            ]
+          },
+          criteria: Object.fromEntries(Object.entries(planOptions).map(([name, offsets]) => [name, {
+            click_offsets_ms: offsets,
+            effect: offsets.length ? "Click only at these times after answer arrival; otherwise let gravity act." : "Let gravity act for the full 800ms without clicking."
+          }]))
+        }
+      }
+    };
+  }
+  function parsePlanDecision(result) {
+    const answer = result?.answers?.plan;
+    const confidence = answer?.confidence ?? answer?.answer_confidence ?? null;
+    if (answer?.type !== "choice" || !Object.hasOwn(planOptions, answer.choice) ||
+        (confidence !== null && (!Number.isFinite(confidence) || confidence < 0 || confidence > 1))) {
+      throw new Error("Jevのクリック予定の応答形式が不正です。");
+    }
+    let probabilities = null;
+    if (answer.probabilities !== undefined) {
+      const values = answer.probabilities;
+      if (!values || typeof values !== "object" || Array.isArray(values) ||
+          Object.keys(values).length !== Object.keys(planOptions).length ||
+          Object.keys(planOptions).some(name => !Number.isFinite(values[name]) || values[name] < 0 || values[name] > 1) ||
+          Math.abs(Object.values(values).reduce((sum, p) => sum + p, 0) - 1) > 0.02) {
+        throw new Error("Jevのクリック予定の選択確率が不正です。");
+      }
+      probabilities = Object.fromEntries(Object.keys(planOptions).map(name => [name, values[name]]));
+    }
+    return {
+      plan: answer.choice, clickOffsetsMs: [...planOptions[answer.choice]], confidence, probabilities,
+      model: String(result.model ?? "unknown").slice(0, 200)
+    };
+  }
   function estimateLatency(samples) {
     // Priors come from the 99 completed responses in the supplied v1.2.5 logs.
     // A small prior prevents the first slow reply from becoming the sole estimate.
@@ -218,5 +289,6 @@
       sample_age_ms: number(input.sample_age_ms ?? 0, 0, 1000)
     };
   }
-  globalThis.ChofuJev = Object.freeze({ observe, flapNeeded, buildRequest, parseDecision, sanitizeState, estimateLatency, endpoint, originPattern });
+  globalThis.ChofuJev = Object.freeze({ observe, flapNeeded, buildRequest, parseDecision, sanitizeState, estimateLatency, endpoint, originPattern,
+    buildPlanRequest, parsePlanDecision, sanitizePlanState, planOptions, PLAN_SLOT_MS, PLAN_HORIZON_MS, PLAN_REPLAN_MS });
 })();

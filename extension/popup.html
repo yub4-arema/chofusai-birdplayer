@@ -8,7 +8,7 @@
     <p class="intro">接続先とモデルを変えて、どこまで続くか試せます。</p>
     <form id="settings">
       <label for="mode">プレイ方法</label>
-      <select id="mode"><option value="jev">Jevがクリック／待機を判断</option><option value="local">ローカルテスト（API未使用）</option></select>
+      <select id="mode"><option value="jev-plan">Jevが固定のクリック予定を選択（実験）</option><option value="jev">Jevがクリック／待機を判断（従来方式）</option><option value="local">ローカルテスト（API未使用）</option></select>
       <label for="endpoint">接続先URL</label>
       <input id="endpoint" type="url" value="https://api.typesafe.ai/v1/systemone" list="endpoints" spellcheck="false" required maxlength="2048">
       <datalist id="endpoints">
