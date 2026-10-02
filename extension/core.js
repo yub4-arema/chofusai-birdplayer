@@ -67,7 +67,7 @@
       questions: {
         action: {
           type: "choice",
-          instructions: "Choose the immediate gameplay action for the moment this response is received. Select click to send exactly one flap click now, or wait to send no input until the next observation. The extension executes your choice directly; no local controller chooses flap timing or tracks a target height. Use predicted_at_response as the estimated state when your answer arrives. The player falls under gravity and a click sets upward velocity. Coordinates increase DOWNWARD. Prefer survival through the next and following gaps. Do not give explanations.",
+          instructions: "Choose ONLY whether to click now or wait. Coordinates use y increasing downward. A negative player.velocityY means the player is rising (moving UP); a positive value means falling (moving DOWN). The same sign rule applies to predicted_at_response.player_velocity_y. gravity is positive and accelerates DOWNWARD; flapVelocity is negative, so a click makes the player jump UP. Game over occurs if the player's top (player.y - player.radius) goes above vertical_bounds.top_wall_y or the bottom (player.y + player.radius) goes below vertical_bounds.bottom_wall_y. vertical_bounds.safe_center_y_min and safe_center_y_max are the allowed range for the player's center, including radius. Keep the entire player inside each obstacle opening too: gapTop is the opening's upper edge, gapBottom its lower edge. Use current and predicted position/direction, both vertical out boundaries, and the next gaps to time the next single click. The extension executes your click/wait choice directly. Do not choose a route or target height, and do not give explanations.",
           criteria: {
             click: "Send one flap click immediately when your response is received.",
             wait: "Do not click before the next observation."
@@ -77,13 +77,13 @@
     };
   }
   function parseDecision(result) {
-    const answer = result?.answers?.action;
-    const confidence = answer?.confidence ?? answer?.answer_confidence ?? answer?.probabilities?.[answer?.choice] ?? null;
-    if (answer?.type !== "choice" || !["click", "wait"].includes(answer.choice) ||
+    const action = result?.answers?.action;
+    const confidence = action?.confidence ?? action?.answer_confidence ?? action?.probabilities?.[action?.choice] ?? null;
+    if (action?.type !== "choice" || !["click", "wait"].includes(action.choice) ||
         (confidence !== null && (!Number.isFinite(confidence) || confidence < 0 || confidence > 1))) {
       throw new Error("Jevの応答形式が不正です。");
     }
-    return { action: answer.choice, confidence, model: String(result.model ?? "unknown").slice(0, 200) };
+    return { action: action.choice, confidence, model: String(result.model ?? "unknown").slice(0, 200) };
   }
   function endpoint(value) {
     if (typeof value !== "string" || value.length > 2048) throw new Error("接続先URLを確認してください。");
@@ -110,17 +110,31 @@
     });
     const predicted = input.predicted_at_response;
     if (!predicted || typeof predicted !== "object") throw new Error("ゲーム状態が不正です。");
+    const screenWidth = number(input.screen?.width, 100, 10000);
+    const screenHeight = number(input.screen?.height, 100, 10000);
+    const playerX = number(input.player?.x, 0, 10000);
+    const playerY = number(input.player?.y, 0, 10000);
+    const playerRadius = number(input.player?.radius, 1, 100);
+    const velocityY = number(input.player?.velocityY, -5000, 5000);
+    const predictedVelocityY = number(predicted.player_velocity_y, -5000, 5000);
     return {
-      screen: { width: number(input.screen?.width, 100, 10000), height: number(input.screen?.height, 100, 10000) },
-      player: { x: number(input.player?.x, 0, 10000), y: number(input.player?.y, 0, 10000),
-        radius: number(input.player?.radius, 1, 100), velocityY: number(input.player?.velocityY, -5000, 5000) },
+      screen: { width: screenWidth, height: screenHeight },
+      player: { x: playerX, y: playerY, radius: playerRadius, velocityY,
+        vertical_direction: velocityY < 0 ? "up" : "down" },
       physics: { gravity: number(input.physics?.gravity, 500, 3000), flapVelocity: number(input.physics?.flapVelocity, -1000, -100), speedX: number(input.physics?.speedX, 50, 500) },
       next: obstacle(input.next), following: obstacle(input.following),
+      vertical_bounds: {
+        top_wall_y: 0,
+        bottom_wall_y: screenHeight,
+        safe_center_y_min: playerRadius,
+        safe_center_y_max: screenHeight - playerRadius
+      },
       since_last_click_ms: number(input.since_last_click_ms, 0, 100000),
       decision_horizon_ms: number(input.decision_horizon_ms, 0, 1000),
       predicted_at_response: {
         player_y: number(predicted.player_y, -1000, 10000),
-        player_velocity_y: number(predicted.player_velocity_y, -5000, 5000),
+        player_velocity_y: predictedVelocityY,
+        vertical_direction: predictedVelocityY < 0 ? "up" : "down",
         next: obstacle(predicted.next),
         following: obstacle(predicted.following)
       }
