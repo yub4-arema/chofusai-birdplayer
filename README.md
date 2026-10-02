@@ -2,15 +2,28 @@
 
 https://www.chofusai.jp/map/ の準備中ページにあるミニゲームを自動でプレイする、Chrome用のManifest V3拡張機能です。
 
-**Jevがゲーム状態ごとに「今クリック」または「待機」を選び、拡張機能はその判断どおりに操作します。** Canvasのピクセルから赤い丸と障害物を読み取り、設定したAPIへ数値状態を送ります。Jevモードではローカルのタイミング制御を使いません。ゲームの物理・当たり判定・得点は変更しません。
+## 公開している2つの方式
+
+Jevに任せる判断が異なる2方式を、それぞれ公開しています。
+
+| 配布版 | Jevが判断すること | クリックのタイミングを決めるもの | インストール用ZIP |
+|---|---|---|---|
+| [v1.1.0：通過位置選択＋ローカル制御](https://github.com/yub4-arema/chofusai-birdplayer/releases/tag/v1.1.0) | 次の隙間を上寄り・中央・下寄りのどこで通るか | 拡張機能のローカル制御 | [v1.1.0 ZIP](https://github.com/yub4-arema/chofusai-birdplayer/releases/download/v1.1.0/chofusai-birdplayer-v1.1.0-route-local.zip) |
+| [v1.2.8：Jevによるクリック判断（この方式の最新版）](https://github.com/yub4-arema/chofusai-birdplayer/releases/tag/v1.2.8) | 応答時にクリックするか、次の応答まで待つか | Jevのclick/wait応答をそのまま実行 | [v1.2.8 ZIP](https://github.com/yub4-arema/chofusai-birdplayer/releases/download/v1.2.8/chofusai-birdplayer-v1.2.8-jev-click.zip) |
+
+両版ともCanvasのピクセルから赤い丸と障害物を読み取り、設定したAPIへ数値状態を送ります。ゲームの物理・当たり判定・得点は変更しません。v1.1.0の得点にはローカルのクリック制御が大きく影響するため、クリック判断をJevに任せるv1.2.8とは評価条件が異なります。
+
+以下のAPI入力、操作、診断ログの説明はv1.2.8を対象にしています。v1.1.0の詳細は[その版のREADME](https://github.com/yub4-arema/chofusai-birdplayer/blob/v1.1.0/README.md)を参照してください。
 
 ## インストール
 
-1. [GitHub Releases](https://github.com/yub4-arema/chofusai-birdplayer/releases/latest)から配布ZIPをダウンロードし、展開します。
+1. 上の表から使う方式のZIPをダウンロードし、展開します。
 2. Chromeで `chrome://extensions` を開き、右上の「デベロッパーモード」を有効にします。
 3. 「パッケージ化されていない拡張機能を読み込む」を押します。
 4. 展開したフォルダの中の **`extension` フォルダ**（`manifest.json` が入っているフォルダ）を選びます。
 5. [ゲームページ](https://www.chofusai.jp/map/)を開きます。すでに開いている場合は再読み込みしてください。
+
+両方をインストールする場合、ゲームページで有効にする拡張機能は片方だけにしてください。方式を切り替えたらゲームページを再読み込みします。
 
 ## APIキーを入れる場所
 
