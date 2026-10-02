@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "調布祭 Flappy × Jev",
-  "version": "1.2.6",
+  "version": "1.2.7",
   "description": "調布祭マップのミニゲームで、Jevがクリックするか待つかを判断します。",
   "permissions": ["storage"],
   "host_permissions": ["https://api.typesafe.ai/*"],

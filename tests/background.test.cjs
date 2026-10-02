@@ -17,7 +17,7 @@ function harness(existing) {
     async set(values) { Object.assign(stores[kind], values); }
   });
   const context = vm.createContext({
-    console, URL, performance, crypto: { randomUUID }, AbortController, Response, DOMException,
+    console, URL, performance, crypto: { randomUUID }, AbortController, Response, DOMException, TextEncoder,
     setTimeout, clearTimeout,
     chrome: {
       storage: { local: storage('local'), session: storage('session') },

@@ -108,7 +108,7 @@
     "correct_choice": "click"
   },
   {
-    "name": "Fast downward motion",
+    "name": "Approaching the apex",
     "state": {
       "protocol": "observed-state-v1",
       "screen": {
@@ -117,9 +117,9 @@
       },
       "player": {
         "x": 163,
-        "y": 84.3,
+        "y": 192,
         "radius": 13,
-        "velocityY": 230
+        "velocityY": -30
       },
       "physics": {
         "gravity": 1500,
@@ -128,14 +128,19 @@
         "maxFrameStepMs": 50,
         "obstacleRadiusFactor": 0.9
       },
-      "next": null,
+      "next": {
+        "x": 603.33,
+        "width": 30,
+        "gapTop": 120,
+        "gapBottom": 300
+      },
       "following": null,
       "vertical_bounds": {
         "top_wall_y": 0,
         "bottom_wall_y": 360
       },
-      "since_last_click_ms": 440,
-      "decision_horizon_ms": 180,
+      "since_last_click_ms": 266.67,
+      "decision_horizon_ms": 200,
       "next_response_latency_ms": 270,
       "response_timing": null,
       "decision_interval_ms": 20,
@@ -267,7 +272,7 @@
     "correct_choice": "wait"
   },
   {
-    "name": "Downward motion close to the floor",
+    "name": "Approaching the apex in the lower half",
     "state": {
       "protocol": "observed-state-v1",
       "screen": {
@@ -276,9 +281,9 @@
       },
       "player": {
         "x": 163,
-        "y": 272.3,
+        "y": 268,
         "radius": 13,
-        "velocityY": 130
+        "velocityY": -55
       },
       "physics": {
         "gravity": 1500,
@@ -287,14 +292,19 @@
         "maxFrameStepMs": 50,
         "obstacleRadiusFactor": 0.9
       },
-      "next": null,
+      "next": {
+        "x": 490.67,
+        "width": 30,
+        "gapTop": 120,
+        "gapBottom": 300
+      },
       "following": null,
       "vertical_bounds": {
         "top_wall_y": 0,
         "bottom_wall_y": 360
       },
-      "since_last_click_ms": 373.33,
-      "decision_horizon_ms": 180,
+      "since_last_click_ms": 250,
+      "decision_horizon_ms": 210,
       "next_response_latency_ms": 270,
       "response_timing": null,
       "decision_interval_ms": 20,

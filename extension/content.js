@@ -34,6 +34,7 @@
   let running = false, generation = 0, timer = null, session = null, prefs = null;
   let last = null, lastFlap = 0, motionVelocity = null, pending = false, nextDecisionAt = 0;
   let latencySamples = [];
+  let inflight = null, drainingSession = null, drainTimer = null;
   let requests = 0, decisions = 0, lastLatency = null, restartAt = null;
   let diagnosticEvents = [], runStartedAt = null, runStartedWall = null, lastLoggedAt = -Infinity, attemptNumber = 0;
   let diagnosticsTruncated = false, gameOverLogged = false;
@@ -46,18 +47,31 @@
     if (runStartedAt === null) return;
     diagnosticEvents.push({ t_ms: Math.round(performance.now() - runStartedAt), type, ...detail });
     if (diagnosticEvents.length > MAX_LOG_EVENTS) { diagnosticEvents.shift(); diagnosticsTruncated = true; }
-    logButton.disabled = false;
+    logButton.disabled = drainingSession !== null;
   }
   const send = msg => chrome.runtime.sendMessage(msg);
-  function controls() { startButton.disabled = running; stopButton.disabled = !running; logButton.disabled = diagnosticEvents.length === 0; }
-  function stop(reason = "停止しました。") {
-    record("stop", { reason, score: score(), pending });
+  function controls() { startButton.disabled = running; stopButton.disabled = !running && drainingSession === null; logButton.disabled = diagnosticEvents.length === 0 || drainingSession !== null; }
+  function stop(reason = "停止しました。", retainResponse = false) {
+    clearTimeout(drainTimer); drainTimer = null;
+    record("stop", { reason, score: score(), pending, inflight_elapsed_ms: inflight ? Math.round(performance.now() - inflight.startedAt) : null });
+    drainingSession = retainResponse && inflight ? inflight.session : null;
     generation++;
     running = false;
     cancelAnimationFrame(timer); timer = null;
     last = null; pending = false; nextDecisionAt = 0;
-    controls(); message.textContent = reason; showStats();
-    send({ type: "run:stop" }).catch(() => {});
+    controls(); message.textContent = reason + (drainingSession ? " 診断用の応答を待っています…" : ""); showStats();
+    if (!drainingSession) {
+      inflight = null;
+      send({ type: "run:stop", id: session }).catch(() => {});
+    } else {
+      const retainedSession = drainingSession;
+      drainTimer = setTimeout(() => {
+        if (drainingSession === retainedSession) {
+          record("diagnostic_wait_timeout", { limit_ms: 3000 });
+          stop("ゲーム終了。診断用の応答待ちも終了しました。ログをコピーできます。");
+        }
+      }, 3000);
+    }
   }
   function flap(source = "local") {
     stage.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, cancelable: true, pointerType: "mouse", button: 0, buttons: 1 }));
@@ -68,6 +82,7 @@
   function resetTracking() { last = null; motionVelocity = null; pending = false; nextDecisionAt = 0; restartAt = null; }
   async function start() {
     if (running) return { ok: true };
+    if (drainingSession) stop("新しい試行のため診断用の応答待ちを中断しました。");
     const epoch = ++generation;
     running = true; controls(); message.textContent = "設定を確認しています…";
     try {
@@ -127,16 +142,40 @@
   }
   async function ask(frame, velocity, sampledAt) {
     const epoch = generation;
+    const askedSession = session, diagnosticRun = runStartedWall;
     pending = true;
     const attempt = ++attemptNumber;
     const requestStartedAt = performance.now();
+    inflight = { session: askedSession, attempt, startedAt: requestStartedAt, phase: null };
     let state, diagnosticState = null;
     try {
       state = decisionState(frame, velocity, sampledAt);
       diagnosticState = ChofuJev.sanitizeState(state);
       record("request", { attempt, state: diagnosticState });
-      const response = await send({ type: "decide", id: session, state });
-      if (epoch !== generation || !running) return;
+      const response = await send({ type: "decide", id: askedSession, attempt, state });
+      const ended = game.querySelector('[data-panel="over"]')?.hidden === false;
+      if (epoch !== generation || !running || ended) {
+        if ((drainingSession === askedSession || (epoch === generation && running && ended)) && diagnosticRun === runStartedWall) {
+          const elapsed = Math.round(performance.now() - requestStartedAt);
+          if (response.ok) {
+            requests = response.requests;
+            record("response_after_game_over", {
+              attempt, action: response.action, confidence: response.confidence, probabilities: response.probabilities,
+              model: response.model, api_latency_ms: response.latencyMs, end_to_end_ms: elapsed,
+              requests, executed: false
+            });
+            message.textContent = `ゲーム終了。終了後に届いた応答（${elapsed}ms）をログへ記録しました。`;
+          } else {
+            record("request_error_after_game_over", { attempt, error: response.error, end_to_end_ms: elapsed });
+            message.textContent = "ゲーム終了。応答待ちの終了理由をログへ記録しました。";
+          }
+          showStats();
+          if (epoch === generation && running && (!response.ok || requests >= prefs.maxRequests)) {
+            stop(response.ok ? "API呼び出し上限に達したため停止しました。" : response.error);
+          }
+        }
+        return;
+      }
       if (!response.ok) throw new Error(response.error);
       const elapsed = performance.now() - requestStartedAt;
       requests = response.requests; lastLatency = response.latencyMs;
@@ -167,9 +206,19 @@
       showStats();
       if (requests >= prefs.maxRequests) stop("API呼び出し上限に達したため停止しました。");
     } catch (error) {
-      record("request_error", { attempt, error: error.message, end_to_end_ms: Math.round(performance.now() - requestStartedAt), state: diagnosticState });
+      if (diagnosticRun === runStartedWall && (epoch === generation || drainingSession === askedSession)) {
+        record(epoch === generation ? "request_error" : "request_error_after_game_over", { attempt, error: error.message, end_to_end_ms: Math.round(performance.now() - requestStartedAt), state: diagnosticState });
+      }
       if (epoch === generation && running) stop(error.message);
+      else if (drainingSession === askedSession && diagnosticRun === runStartedWall) message.textContent = "ゲーム終了。応答待ちのエラーをログへ記録しました。";
     } finally {
+      if (inflight?.session === askedSession && inflight.attempt === attempt) inflight = null;
+      if (drainingSession === askedSession) {
+        clearTimeout(drainTimer); drainTimer = null;
+        drainingSession = null;
+        send({ type: "run:stop", id: askedSession }).catch(() => {});
+        controls();
+      }
       if (epoch === generation) {
         pending = false;
         nextDecisionAt = performance.now() + DECISION_INTERVAL_MS;
@@ -191,11 +240,16 @@
       }
       if (!game.querySelector('[data-panel="over"]')?.hidden) {
         if (!gameOverLogged) {
-          record("game_over", { score: currentScore, pending, last_latency_ms: lastLatency });
+          record("game_over", {
+            score: currentScore, pending, last_latency_ms: lastLatency,
+            inflight_attempt: inflight?.attempt ?? null,
+            inflight_elapsed_ms: inflight ? Math.round(performance.now() - inflight.startedAt) : null,
+            last_network_phase: inflight?.phase ?? null
+          });
           gameOverLogged = true;
         }
         showStats();
-        if (!prefs.autoRestart) { stop(`ゲーム終了：${currentScore}点。開始で再挑戦できます。`); return; }
+        if (!prefs.autoRestart) { stop(`ゲーム終了：${currentScore}点。開始で再挑戦できます。`, pending); return; }
         if (restartAt === null) { restartAt = now + 650; message.textContent = `${currentScore}点で終了。再挑戦します…`; }
         if (now >= restartAt && !pending) {
           game.querySelector('[data-action="restart"]')?.click(); lastFlap = now; record("restart", { source: "auto", score: currentScore }); resetTracking(); gameOverLogged = false;
@@ -262,9 +316,18 @@
   });
   window.addEventListener("pagehide", () => stop());
   window.addEventListener("resize", () => { if (running) stop("画面サイズが変わったため停止しました。開始で再開できます。"); });
-  document.addEventListener("visibilitychange", () => { if (document.hidden && running) stop("タブを離れたため停止しました。"); });
+  document.addEventListener("visibilitychange", () => { if (document.hidden && (running || drainingSession)) stop("タブを離れたため停止しました。"); });
   document.addEventListener("keydown", event => { if (event.key === "Escape" && running) stop(); });
   chrome.runtime.onMessage.addListener((msg, _sender, reply) => {
+    if (msg.type === "decide:progress") {
+      if (inflight?.session === msg.id && inflight.attempt === msg.attempt && (running || drainingSession === msg.id)) {
+        inflight.phase = msg.phase;
+        requests = msg.requests;
+        record("network_phase", { attempt: msg.attempt, phase: msg.phase, worker_elapsed_ms: msg.elapsed_ms, body_bytes: msg.body_bytes, http_status: msg.http_status, requests });
+        showStats();
+      }
+      reply({ ok: true }); return false;
+    }
     if (msg.type === "ui:status") { reply({ ok: true, running, score: score(), best, requests, decisions, message: message.textContent }); return false; }
     if (msg.type === "ui:stop") { stop(); reply({ ok: true }); return false; }
     if (msg.type === "ui:start") { start().then(reply); return true; }

@@ -40,6 +40,7 @@ async function config() {
   return { ...prefs, hasKey: Boolean(stored[prefs.endpoint]) };
 }
 async function handle(message, sender) {
+  const receivedAt = performance.now();
   await ready;
   if (message?.type === "config:get" && isPopup(sender)) return { ok: true, config: await config() };
   if (message?.type === "key:clear" && isPopup(sender)) {
@@ -85,7 +86,11 @@ async function handle(message, sender) {
       throw error;
     }
   }
-  if (message.type === "run:stop") { end(tabId); return { ok: true }; }
+  if (message.type === "run:stop") {
+    // Cleanup from an old diagnostic request must not abort a newly started run.
+    if (!message.id || sessions.get(tabId)?.id === message.id) end(tabId);
+    return { ok: true };
+  }
   const session = sessions.get(tabId);
   if (!session || message.id !== session.id) throw new Error("セッションが終了しました。もう一度開始してください。");
   if (message.type !== "decide" || session.prefs.mode !== "jev") throw new Error("操作が不正です。");
@@ -95,28 +100,45 @@ async function handle(message, sender) {
   const controller = new AbortController();
   session.controller = controller;
   let timer;
+  let timedOut = false;
   const started = performance.now();
+  const progress = (phase, detail = {}) => {
+    if (!Number.isInteger(message.attempt)) return;
+    chrome.tabs.sendMessage(tabId, {
+      type: "decide:progress", id: session.id, attempt: message.attempt,
+      phase, elapsed_ms: Math.round(performance.now() - receivedAt), requests: session.count, ...detail
+    }, { frameId: 0 }).catch(() => {});
+  };
+  progress("worker_ready");
   try {
     const apiKey = (await keys())[session.prefs.endpoint];
     if (new URL(session.prefs.endpoint).origin === "https://api.typesafe.ai" && !apiKey) throw new Error("APIキーがありません。拡張機能から再設定してください。");
     if (session.prefs.endpoint !== defaults.endpoint && !await chrome.permissions.contains({ origins: [ChofuJev.originPattern(session.prefs.endpoint)] })) throw new Error("接続先へのアクセス権がありません。");
     if (sessions.get(tabId) !== session) throw new Error("セッションが終了しました。");
     session.count++;
-    timer = setTimeout(() => controller.abort(), 2500);
+    const body = JSON.stringify(ChofuJev.buildRequest(state, session.prefs.model));
+    progress("request_prepared", { body_bytes: new TextEncoder().encode(body).byteLength });
+    timer = setTimeout(() => { timedOut = true; controller.abort(); }, 2500);
+    progress("fetch_started");
     const response = await fetch(session.prefs.endpoint, {
       method: "POST",
       headers: { ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}), "Content-Type": "application/json", Accept: "application/json" },
-      body: JSON.stringify(ChofuJev.buildRequest(state, session.prefs.model)), signal: controller.signal,
+      body, signal: controller.signal,
       credentials: "omit", redirect: "error"
     });
+    progress("headers_received", { http_status: response.status });
     if (!response.ok) {
       const reasons = { 401: "APIキーが無効です", 403: "APIへのアクセス権がありません", 429: "APIの利用制限に達しました" };
       throw new Error(`Jev API: ${reasons[response.status] ?? "接続エラー"} (HTTP ${response.status})`);
     }
-    const decision = ChofuJev.parseDecision(await response.json());
+    const result = await response.json();
+    progress("body_received");
+    const decision = ChofuJev.parseDecision(result);
     if (sessions.get(tabId) !== session) throw new Error("セッションが終了しました。");
+    progress("decision_parsed");
     return { ok: true, ...decision, latencyMs: Math.round(performance.now() - started), requests: session.count };
   } catch (error) {
+    progress(error.name === "AbortError" ? (timedOut ? "timeout" : "cancelled") : "request_failed");
     if (error.name === "AbortError") throw new Error("Jevの応答待ちが終了しました（停止またはタイムアウト）。");
     if (error instanceof TypeError) throw new Error("Jev APIに接続できません。ネットワークを確認してください。");
     throw error;

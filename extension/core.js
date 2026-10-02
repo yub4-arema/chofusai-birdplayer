@@ -72,6 +72,7 @@
               "Coordinates are pixels; y increases downward. velocityY is pixels/second, gravity is pixels/second squared, and negative velocityY means rising. A click SETS velocityY to flapVelocity; it does not add an impulse. Clicking while rising resets full upward speed and prolongs the climb.",
               "Each game frame caps elapsed time at physics.maxFrameStepMs, then updates velocityY += gravity*dt and y += velocityY*dt. Obstacles move left at speedX. Game over occurs if the player's circle touches an obstacle or crosses the upper/lower wall. gapTop/gapBottom are the opening boundaries. Wall tests use player.radius; obstacle circle/rectangle tests use player.radius * physics.obstacleRadiusFactor.",
               "player and obstacles are OBSERVED at sample time. No collision verdict, predicted position, trajectory, or target height is supplied. decision_horizon_ms estimates observation-to-answer time. Clicking happens AFTER this delay, not at the observed position. A wait leaves the player without input until the next answer; account for decision_interval_ms plus next_response_latency_ms. response_timing contains estimates, not guaranteed deadlines.",
+              "A slightly negative observed velocity can become positive before this answer arrives. Near the apex, waiting for two response delays can be too late even though the bird is still rising in the observation. Evaluate the whole wait interval, not just the observed direction.",
               "Choose the action that best preserves survival and passage through the next opening. A needless flap can push the player too high. If both choices allow a later decision safely, prefer waiting. If both are dangerous, choose the one with more time to recover. Distant obstacles can be handled by later answers.",
               "Examples show observed-state inputs and the selected action under their estimated timing. They are fixed demonstrations, not the current game state. Infer the current decision from state, not from the example names. Do not choose a route or target height, and do not give explanations."
             ],
@@ -119,31 +120,29 @@
   let cachedExamples = null;
   function decisionExamples() {
     if (cachedExamples) return cachedExamples;
-    // These reference states were chosen using the parabola calculations documented
-    // during development. Only observed inputs and action labels go to the model.
+    // Fixed observed-state demonstrations. Two near-apex inputs come from v1.2.6
+    // logs where waiting left too little time. Only inputs and labels are sent.
     const cases = [
-      ["Rising with ample room", 200, -150, null, "wait"],
-      ["Small upper clearance", 60, -150, null, "wait"],
-      ["Downward motion in the lower half", 220, 250, null, "click"],
-      ["Fast downward motion", 150, 500, null, "click"],
-      ["Approaching an elevated opening", 200, 200, [60, 180], "click"],
-      ["Approaching an opening while high", 150, -50, [100, 280], "wait"],
-      ["Approaching a wide opening", 200, 0, [120, 300], "wait"],
-      ["Downward motion close to the floor", 320, 400, null, "click"],
-      ["Upward motion close to the ceiling", 30, -270, null, "wait", 100],
-      ["An opening far ahead", 200, -150, [180, 300], "wait", 180, 700]
+      ["Rising with ample room", 251.3, -420, null, "wait", 180],
+      ["Small upper clearance", 111.3, -420, null, "wait", 180],
+      ["Downward motion in the lower half", 199.3, -20, null, "click", 180],
+      ["Approaching the apex", 192, -30, [120, 300], "click", 200, 603.33],
+      ["Approaching an elevated opening", 188.3, -70, [60, 180], "click", 180, 222.2],
+      ["Approaching an opening while high", 183.3, -320, [100, 280], "wait", 180, 222.2],
+      ["Approaching a wide opening", 224.3, -270, [120, 300], "wait", 180, 222.2],
+      ["Approaching the apex in the lower half", 268, -55, [120, 300], "click", 210, 490.67],
+      ["Upward motion close to the ceiling", 64.5, -420, null, "wait", 100],
+      ["An opening far ahead", 251.3, -420, [180, 300], "wait", 180, 729.7]
     ];
-    cachedExamples = cases.map(([name, y, v, gap, action, delayMs = 180, obstacleX = 192.5]) => {
-      const seconds = delayMs / 1000;
-      const observedVelocity = v - 1500 * seconds;
-      const next = gap ? { x: obstacleX + 165 * seconds, width: 30, gapTop: gap[0], gapBottom: gap[1] } : null;
+    cachedExamples = cases.map(([name, y, velocityY, gap, action, delayMs, obstacleX]) => {
+      const next = gap ? { x: obstacleX, width: 30, gapTop: gap[0], gapBottom: gap[1] } : null;
       return {
         name,
         state: sanitizeState({
           screen: { width: 672, height: 360 },
-          player: { x: 163, y: y - v * seconds + 0.5 * 1500 * seconds ** 2, radius: 13, velocityY: observedVelocity },
+          player: { x: 163, y, radius: 13, velocityY },
           physics: { gravity: 1500, flapVelocity: -430, speedX: 165 }, next, following: null,
-          since_last_click_ms: (observedVelocity + 430) / 1500 * 1000,
+          since_last_click_ms: (velocityY + 430) / 1500 * 1000,
           decision_horizon_ms: delayMs, next_response_latency_ms: 270, decision_interval_ms: 20,
           sample_age_ms: 0
         }),
