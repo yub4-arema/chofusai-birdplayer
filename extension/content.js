@@ -22,7 +22,7 @@
     <div class="box">
       <div class="row"><strong>調布祭 Flappy × Jev</strong><div><button id="start">開始</button> <button id="stop" disabled>停止</button> <button id="log" disabled>ログをコピー</button></div></div>
       <p id="message" role="status" aria-live="polite">拡張機能のアイコンからAPIキーを設定して、開始してください。</p>
-      <small id="stats">Jevが操作を選択し、拡張機能が選択どおりに実行します。</small>
+      <small id="stats">Jevが約50msごとにFLAP／WAITを判断します。</small>
       <textarea id="logData" aria-label="診断ログ" rows="10" readonly hidden></textarea>
     </div>`;
   game.before(host);
@@ -31,6 +31,9 @@
   const logButton = shadow.getElementById("log"), logData = shadow.getElementById("logData");
   const DECISION_INTERVAL_MS = 20, MAX_ACTION_LATENCY_MS = 900;
   const MAX_SCHEDULE_LATE_MS = 50;
+  const REFLEX_REQUEST_INTERVAL_MS = ChofuJev.REFLEX_REQUEST_INTERVAL_MS;
+  const REFLEX_MAX_IN_FLIGHT = ChofuJev.REFLEX_MAX_IN_FLIGHT;
+  const REFLEX_MAX_LATE_MS = ChofuJev.REFLEX_MAX_LATE_MS;
   const LOG_INTERVAL_MS = 50, MAX_LOG_EVENTS = 2400;
   let running = false, generation = 0, timer = null, session = null, prefs = null;
   let last = null, lastFlap = 0, motionVelocity = null, pending = false, nextDecisionAt = 0;
@@ -42,17 +45,49 @@
   let best = 0, bestKey = "chofu-jev-best";
   let clickQueue = [], planExpiresAt = null, planAttempt = null, planGapStartedAt = null;
   let benchmark = null, metrics = null, episodeStartedAt = null, gameNumber = 0, runStoppedAt = null;
+  let reflexInFlight = new Map(), reflexQueue = [], reflexNextRequestAt = 0, reflexFlapEpoch = 0, reflexLastAction = null;
   const score = () => Number(game.querySelector("[data-score]")?.textContent || 0) || 0;
+  const gameIsOver = () => {
+    const panel = game.querySelector('[data-panel="over"]');
+    return Boolean(panel && !panel.hidden);
+  };
   function showStats() {
-    stats.textContent = `スコア ${score()} ／ ベスト ${best} ／ Jev判断 ${decisions}回 ／ API ${requests}/${prefs?.maxRequests ?? 200}回${lastLatency === null ? "" : ` ／ ${lastLatency}ms`}`;
+    const currentInFlight = prefs?.mode === "jev-reflex-neutral" ? reflexInFlight.size : Number(pending);
+    const reflex = prefs?.mode === "jev-reflex-neutral" ? ` ／ 並列 ${currentInFlight}/${REFLEX_MAX_IN_FLIGHT}` : "";
+    stats.textContent = `スコア ${score()} ／ ベスト ${best} ／ Jev判断 ${decisions}回 ／ API ${requests}/${prefs?.maxRequests ?? 200}回${reflex}${lastLatency === null ? "" : ` ／ ${lastLatency}ms`}`;
   }
   function record(type, detail = {}) {
     if (runStartedAt === null) return;
     if (metrics) {
       if (type === "request") metrics.requests++;
+      if (type === "reflex_request") {
+        metrics.requests++;
+        if (metrics.reflex) {
+          metrics.reflex.requests_sent++;
+          metrics.reflex.max_observed_in_flight = Math.max(metrics.reflex.max_observed_in_flight, detail.in_flight ?? 0);
+        }
+      }
+      if (type === "request_skipped" && metrics.reflex) metrics.reflex.request_skips += detail.count ?? 1;
+      if (type === "reflex_invalidation" && metrics.reflex) metrics.reflex.invalidated_requests++;
+      if (type === "reflex_result" && metrics.reflex) {
+        if (detail.discard_reason === "superseded") metrics.reflex.superseded_responses++;
+        if (detail.discard_reason === "stale") metrics.reflex.stale_responses++;
+        if (detail.discard_reason === "game_over") metrics.reflex.game_over_responses++;
+        if (detail.action === "FLAP") metrics.reflex.flap_decisions++;
+        if (detail.action === "WAIT") metrics.reflex.wait_decisions++;
+        if (detail.confidence !== null && detail.confidence !== undefined) metrics.reflex.confidence_samples.push(detail.confidence);
+        if (detail.executed && detail.action === "FLAP") metrics.reflex.flaps_executed++;
+        if (detail.executed && detail.action === "WAIT") metrics.reflex.waits_applied++;
+        if (detail.executed && detail.execution_lateness_ms > 0) metrics.reflex.late_decisions++;
+      }
+      if (type === "reflex_request_error" && metrics.reflex) {
+        metrics.reflex.request_errors++;
+        metrics.reflex.failure_classes[detail.failure_class ?? "unknown"] = (metrics.reflex.failure_classes[detail.failure_class ?? "unknown"] ?? 0) + 1;
+      }
       if (type === "response" || type === "response_after_game_over") {
         metrics.latencies_ms.push(detail.end_to_end_ms);
         metrics.resolved_models[detail.model] = (metrics.resolved_models[detail.model] ?? 0) + 1;
+        if (metrics.reflex && Number.isFinite(detail.latency_ms)) metrics.reflex.api_latencies_ms.push(detail.latency_ms);
         if (type === "response_after_game_over") metrics.late_responses++;
         else { metrics.decisions++; const choice = detail.plan ?? detail.action; metrics.choices[choice] = (metrics.choices[choice] ?? 0) + 1; }
       }
@@ -60,10 +95,10 @@
       if (type === "plan_cancelled" && detail.reason === "replaced") metrics.superseded_clicks += detail.cancelled_clicks.length;
       if (type === "plan_cancelled" && detail.reason !== "replaced") metrics.terminated_clicks += detail.cancelled_clicks.length;
       if (type === "scheduled_click_missed") metrics.missed_clicks++;
-      if (type === "request_error" || type === "request_error_after_game_over") metrics.request_errors++;
+      if (["request_error", "request_error_after_game_over", "reflex_request_error"].includes(type)) metrics.request_errors++;
       if (type === "plan_underrun") metrics.plan_underruns++;
       if (type === "plan_gap_closed") metrics.plan_gap_ms += detail.duration_ms;
-      if (type === "click" && ["jev", "jev-plan"].includes(detail.source)) metrics.executed_clicks++;
+      if (type === "click" && ["jev", "jev-plan", "jev-reflex-neutral"].includes(detail.source)) metrics.executed_clicks++;
       if (type === "scheduled_click_executed") metrics.execution_delays_ms.push(detail.late_ms);
       if (type === "manual_input") metrics.manual_inputs++;
       if (type === "game_over") metrics.games.push({ game: gameNumber, score: detail.score, survival_ms: detail.survival_ms, ended: "game_over" });
@@ -80,10 +115,18 @@
   function controls() { startButton.disabled = running; stopButton.disabled = !running && drainingSession === null; logButton.disabled = diagnosticEvents.length === 0 || drainingSession !== null; }
   function stop(reason = "停止しました。", retainResponse = false) {
     clearTimeout(drainTimer); drainTimer = null;
-    if (running) runStoppedAt = performance.now();
+    const now = performance.now();
+    const reflexMode = prefs?.mode === "jev-reflex-neutral";
+    if (running) runStoppedAt = now;
     clearPlan("stop");
-    record("stop", { reason, score: score(), pending, inflight_elapsed_ms: inflight ? Math.round(performance.now() - inflight.startedAt) : null });
-    drainingSession = retainResponse && inflight ? inflight.session : null;
+    const hasPending = reflexMode ? reflexInFlight.size > 0 : Boolean(inflight);
+    record("stop", {
+      reason, score: score(), pending: hasPending,
+      inflight_elapsed_ms: inflight ? Math.round(now - inflight.startedAt) : null,
+      inflight_request_ids: reflexMode ? [...reflexInFlight.keys()] : undefined
+    });
+    if (reflexMode) discardReflexQueue(retainResponse ? "game_over" : "stopped", now);
+    drainingSession = retainResponse && hasPending ? session : null;
     generation++;
     running = false;
     cancelAnimationFrame(timer); timer = null;
@@ -91,18 +134,35 @@
     controls(); message.textContent = reason + (drainingSession ? " 診断用の応答を待っています…" : ""); showStats();
     if (!drainingSession) {
       inflight = null;
+      if (reflexMode) {
+        for (const request of reflexInFlight.values()) record("reflex_request_terminated", {
+          request_id: request.request_id, discard_reason: retainResponse ? "game_over" : "stopped",
+          flap_epoch: request.flap_epoch
+        });
+        reflexInFlight.clear(); reflexQueue = [];
+      }
       send({ type: "run:stop", id: session }).catch(() => {});
     } else {
       const retainedSession = drainingSession;
       drainTimer = setTimeout(() => {
         if (drainingSession === retainedSession) {
           record("diagnostic_wait_timeout", { limit_ms: 3000 });
-          stop("ゲーム終了。診断用の応答待ちも終了しました。ログをコピーできます。");
+          if (reflexMode) {
+            for (const request of reflexInFlight.values()) record("reflex_request_terminated", {
+              request_id: request.request_id, discard_reason: "game_over", flap_epoch: request.flap_epoch,
+              reason: "diagnostic_wait_timeout"
+            });
+            reflexInFlight.clear();
+            drainingSession = null;
+            send({ type: "run:stop", id: retainedSession }).catch(() => {});
+            message.textContent = "ゲーム終了。診断用の応答待ちも終了しました。ログをコピーできます。";
+            controls(); showStats();
+          } else stop("ゲーム終了。診断用の応答待ちも終了しました。ログをコピーできます。");
         }
       }, 3000);
     }
   }
-  function flap(source = "local") {
+  function flap(source = "jev-reflex-neutral") {
     stage.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, cancelable: true, pointerType: "mouse", button: 0, buttons: 1 }));
     lastFlap = performance.now();
     motionVelocity = -430 * (last?.frame.scale ?? Math.max(0.7, Math.min(1.15, stage.clientHeight / 360)));
@@ -152,6 +212,7 @@
   function resetTracking() {
     clearPlan("restart");
     last = null; motionVelocity = null; pending = false; nextDecisionAt = 0; restartAt = null;
+    reflexInFlight = new Map(); reflexQueue = []; reflexNextRequestAt = 0; reflexFlapEpoch = 0; reflexLastAction = null;
   }
   async function start() {
     if (running) return { ok: true };
@@ -172,14 +233,23 @@
       lastLoggedAt = -Infinity; attemptNumber = 0; diagnosticsTruncated = false; gameOverLogged = false;
       metrics = { requests: 0, request_errors: 0, decisions: 0, late_responses: 0, latencies_ms: [], resolved_models: {}, choices: {},
         planned_clicks: 0, executed_clicks: 0, superseded_clicks: 0, terminated_clicks: 0, missed_clicks: 0, execution_delays_ms: [],
-        plan_underruns: 0, plan_gap_ms: 0, manual_inputs: 0, games: [] };
+        plan_underruns: 0, plan_gap_ms: 0, manual_inputs: 0, games: [],
+        ...(prefs.mode === "jev-reflex-neutral" ? { reflex: {
+          request_interval_ms: REFLEX_REQUEST_INTERVAL_MS, max_in_flight: REFLEX_MAX_IN_FLIGHT,
+          max_late_response_ms: REFLEX_MAX_LATE_MS, requests_sent: 0, request_skips: 0, request_errors: 0,
+          failure_classes: {}, flap_decisions: 0, wait_decisions: 0, flaps_executed: 0, waits_applied: 0,
+          confidence_samples: [], api_latencies_ms: [], max_observed_in_flight: 0,
+          invalidated_requests: 0, superseded_responses: 0, stale_responses: 0, game_over_responses: 0, late_decisions: 0
+        } } : {}) };
       gameNumber = 0; episodeStartedAt = null; runStoppedAt = null;
       const questions = prefs.mode === "jev-plan" ? ChofuJev.buildPlanRequest(null, prefs.model).questions
-        : prefs.mode === "jev" ? ChofuJev.buildRequest(null, prefs.model).questions : null;
+        : prefs.mode === "jev" ? ChofuJev.buildRequest(null, prefs.model).questions
+          : prefs.mode === "jev-reflex-neutral" ? ChofuJev.buildReflexRequest(null, prefs.model).questions : null;
       const digest = questions ? await crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify(questions))) : null;
       if (epoch !== generation) return { ok: false, error: "開始をキャンセルしました。" };
       benchmark = {
-        protocol: prefs.mode === "jev-plan" ? "scheduled-observed-state-v1" : prefs.mode === "jev" ? "observed-state-v1" : "local",
+        protocol: prefs.mode === "jev-plan" ? "scheduled-observed-state-v1" : prefs.mode === "jev" ? "observed-state-v1"
+          : prefs.mode === "jev-reflex-neutral" ? "jev-reflex-neutral-v1" : "local",
         mode: prefs.mode, endpoint: prefs.endpoint, requested_model: prefs.model,
         questions_sha256: digest ? [...new Uint8Array(digest)].map(n => n.toString(16).padStart(2, "0")).join("") : null,
         questions, max_requests: prefs.maxRequests, auto_restart: prefs.autoRestart,
@@ -189,7 +259,12 @@
           options: ChofuJev.planOptions, anchor: "answer-arrival", replacement: "cancel remaining old clicks on answer arrival",
           expired_plan: "no input", max_execution_late_ms: MAX_SCHEDULE_LATE_MS
         } : prefs.mode === "jev" ? { decision_interval_ms: DECISION_INTERVAL_MS, stale_response_stop_ms: MAX_ACTION_LATENCY_MS }
-          : { policy: "local middle-of-gap control", api: false },
+          : prefs.mode === "jev-reflex-neutral" ? {
+            request_interval_ms: REFLEX_REQUEST_INTERVAL_MS, max_in_flight: REFLEX_MAX_IN_FLIGHT,
+            target: "predicted answer application time", prediction: "semi-implicit physics extrapolation at 60Hz",
+            max_late_response_ms: REFLEX_MAX_LATE_MS, flap_epoch_supersession: true,
+            request_cap_behavior: "skip requests and keep real-time game running"
+          } : { policy: "local middle-of-gap control", api: false },
         stage: { width: stage.clientWidth, height: stage.clientHeight },
         canvas: { width: canvas.width, height: canvas.height },
         user_agent: navigator.userAgent, device_pixel_ratio: devicePixelRatio
@@ -207,8 +282,11 @@
       if (restart) { restart.click(); lastFlap = performance.now(); record("restart", { source: "start" }); } else flap("start");
       episodeStartedAt = lastFlap; gameNumber++;
       if (prefs.mode === "jev-plan") planGapStartedAt = lastFlap;
+      if (prefs.mode === "jev-reflex-neutral") reflexNextRequestAt = lastFlap + REFLEX_REQUEST_INTERVAL_MS;
       message.textContent = prefs.mode === "jev-plan" ? `${prefs.model}が固定のクリック予定を選択しています（実験）。`
-        : prefs.mode === "jev" ? `${prefs.model}がクリックか待機を判断しています。` : "ローカルテスト中（Jev APIは使用していません）。";
+        : prefs.mode === "jev" ? `${prefs.model}がクリックか待機を判断しています。`
+          : prefs.mode === "jev-reflex-neutral" ? `${prefs.model}へ50msごとに中立なFLAP／WAIT判断を要求しています。`
+            : "ローカルテスト中（Jev APIは使用していません）。";
       timer = requestAnimationFrame(tick); showStats();
       return { ok: true };
     } catch (error) {
@@ -339,15 +417,220 @@
       }
     }
   }
+  const runTime = time => Math.round((time - runStartedAt) * 100) / 100;
+  function discardReflexDecision(item, reason, now, extra = {}) {
+    record("reflex_result", {
+        request_id: item.request_id, action: item.action, choice: item.action, confidence: item.confidence,
+      probabilities: item.probabilities, resolved_model: item.model,
+      observation_time: item.observation_time, target_time: item.target_time,
+      received_at: item.received_at, flap_epoch: item.flap_epoch,
+      executed: false, discard_reason: reason, discarded_at: runTime(now), ...extra
+    });
+  }
+  function discardReflexQueue(reason, now = performance.now(), predicate = () => true) {
+    const kept = [];
+    for (const item of reflexQueue) {
+      if (predicate(item)) discardReflexDecision(item, reason, now);
+      else kept.push(item);
+    }
+    reflexQueue = kept;
+  }
+  function applyReflexQueue(now) {
+    let flapped = false;
+    while (reflexQueue.length && reflexQueue[0].target_at <= now) {
+      const item = reflexQueue.shift();
+      const reason = ChofuJev.reflexDiscardReason(
+        { flap_epoch: item.flap_epoch, target_at: item.target_at },
+        reflexFlapEpoch, now,
+        gameOverLogged || gameIsOver() || item.game_number !== gameNumber,
+        REFLEX_MAX_LATE_MS
+      );
+      if (reason) { discardReflexDecision(item, reason, now); continue; }
+      const executedAt = performance.now();
+      const lateness = Math.max(0, executedAt - item.target_at);
+      if (item.action === "FLAP") {
+        const previousEpoch = reflexFlapEpoch;
+        flap("jev-reflex-neutral");
+        reflexFlapEpoch++;
+        reflexNextRequestAt = Math.min(reflexNextRequestAt, executedAt);
+        flapped = true;
+        reflexLastAction = { request_id: item.request_id, action: item.action, executed_at: runTime(executedAt), flap_epoch: reflexFlapEpoch };
+        record("reflex_result", {
+          request_id: item.request_id, action: item.action, choice: item.action, confidence: item.confidence,
+          probabilities: item.probabilities, resolved_model: item.model,
+          observation_time: item.observation_time, target_time: item.target_time,
+          received_at: item.received_at, executed: true, executed_at: runTime(executedAt),
+          execution_lateness_ms: Math.round(lateness * 100) / 100,
+          flap_epoch: previousEpoch, next_flap_epoch: reflexFlapEpoch
+        });
+        discardReflexQueue("superseded", executedAt, queued => queued.flap_epoch === previousEpoch);
+        for (const request of reflexInFlight.values()) {
+          if (request.flap_epoch === previousEpoch) {
+            request.superseded = true;
+            record("reflex_invalidation", {
+              request_id: request.request_id, flap_epoch: previousEpoch,
+              superseded_by_epoch: reflexFlapEpoch, invalidated_at: runTime(executedAt)
+            });
+          }
+        }
+      } else {
+        reflexLastAction = { request_id: item.request_id, action: item.action, executed_at: runTime(executedAt), flap_epoch: reflexFlapEpoch };
+        record("reflex_result", {
+          request_id: item.request_id, action: item.action, choice: item.action, confidence: item.confidence,
+          probabilities: item.probabilities, resolved_model: item.model,
+          observation_time: item.observation_time, target_time: item.target_time,
+          received_at: item.received_at, executed: true, executed_at: runTime(executedAt),
+          execution_lateness_ms: Math.round(lateness * 100) / 100, flap_epoch: reflexFlapEpoch
+        });
+      }
+      message.textContent = `Jev: ${item.action}${item.confidence === null ? "" : ` ／ 信頼度 ${Math.round(item.confidence * 100)}%`} ／ ${item.model === "unknown" ? prefs.model : item.model}`;
+    }
+    return flapped;
+  }
+  function requestReflex(frame, velocity, sampledAt) {
+    const now = performance.now();
+    if (now < reflexNextRequestAt) return;
+    const missedSlots = Math.floor((now - reflexNextRequestAt) / REFLEX_REQUEST_INTERVAL_MS);
+    reflexNextRequestAt += (missedSlots + 1) * REFLEX_REQUEST_INTERVAL_MS;
+    if (missedSlots > 0) record("request_skipped", { reason: "frame_delay", count: missedSlots });
+    if (requests >= prefs.maxRequests) {
+      record("request_skipped", { reason: "max_requests" });
+      return;
+    }
+    if (reflexInFlight.size >= REFLEX_MAX_IN_FLIGHT) {
+      record("request_skipped", { reason: "max_in_flight", in_flight: reflexInFlight.size });
+      return;
+    }
+    const sentAt = performance.now();
+    const estimate = ChofuJev.estimateLatency(latencySamples);
+    const predictedLatency = estimate.typical_ms;
+    const targetAt = sentAt + predictedLatency;
+    const thresholdX = frame.player.x - frame.player.radius;
+    const upcoming = frame.obstacles
+      .filter(obstacle => obstacle.x + obstacle.width >= thresholdX)
+      .sort((a, b) => a.x - b.x)
+      .slice(0, 2);
+    const observed = {
+      screen: { height: frame.height },
+      player: { x: frame.player.x, y: frame.player.y, velocityY: velocity, radius: frame.player.radius },
+      physics: { gravity: 1500 * frame.scale, flapVelocity: -430 * frame.scale, speedX: 165 * frame.scale },
+      next_obstacle: upcoming[0] ?? null,
+      following_obstacle: upcoming[1] ?? null
+    };
+    const observationTime = runTime(sampledAt);
+    const targetTime = runTime(targetAt);
+    const state = ChofuJev.predictReflexState(
+      observed, Math.max(0, targetAt - sampledAt), targetTime, predictedLatency
+    );
+    const request = {
+      request_id: crypto.randomUUID(), session: session, generation,
+      game_number: gameNumber, sent_at: sentAt, observation_at: sampledAt,
+      target_at: targetAt, predicted_latency: predictedLatency,
+      observation_time: observationTime, target_time: targetTime,
+      flap_epoch: reflexFlapEpoch, state, in_flight: reflexInFlight.size + 1
+    };
+    requests++;
+    reflexInFlight.set(request.request_id, request);
+    pending = true;
+    record("reflex_request", {
+      request_id: request.request_id, sent_at: runTime(sentAt),
+      observation_time: observationTime, target_time: targetTime,
+      predicted_latency: predictedLatency, flap_epoch: request.flap_epoch,
+      state_sent_to_jev: state, in_flight: request.in_flight
+    });
+    showStats();
+    void send({
+      type: "decide:reflex", id: request.session, request_id: request.request_id,
+      sent_at: runTime(sentAt), observation_time: observationTime, target_time: targetTime,
+      predicted_latency: predictedLatency, flap_epoch: request.flap_epoch, state
+    }).then(response => completeReflexRequest(request, response, performance.now()))
+      .catch(error => completeReflexRequest(request, { ok: false, error: error.message, failure_class: "harness" }, performance.now()));
+  }
+  function completeReflexRequest(request, response, receivedAt) {
+    if (reflexInFlight.get(request.request_id) !== request) return;
+    reflexInFlight.delete(request.request_id);
+    pending = reflexInFlight.size > 0;
+    const endToEnd = Math.max(0, receivedAt - request.sent_at);
+    const gameOver = gameOverLogged || gameIsOver() || request.game_number !== gameNumber;
+    try {
+      if (response?.ok) {
+        requests = Math.max(requests, response.requests ?? requests);
+        lastLatency = response.latencyMs;
+        latencySamples.push(endToEnd);
+        if (latencySamples.length > 20) latencySamples.shift();
+        const answer = {
+          request_id: request.request_id, action: response.action,
+          choice: response.action,
+          confidence: response.confidence, probabilities: response.probabilities,
+          model: response.model, resolved_model: response.model, latency_ms: response.latencyMs,
+          end_to_end_ms: Math.round(endToEnd * 100) / 100,
+          observation_time: request.observation_time, target_time: request.target_time,
+          predicted_latency: request.predicted_latency, flap_epoch: request.flap_epoch,
+          received_at: runTime(receivedAt), sent_at: runTime(request.sent_at)
+        };
+        record(gameOver ? "response_after_game_over" : "response", {
+          ...answer, resolved_model: answer.model, action: answer.action, executed: false,
+          requests, api_latency_ms: answer.latency_ms
+        });
+        decisions++;
+        const discardReason = ChofuJev.reflexDiscardReason(
+          { flap_epoch: request.flap_epoch, target_at: request.target_at },
+          reflexFlapEpoch, receivedAt, gameOver, REFLEX_MAX_LATE_MS
+        );
+        if (discardReason) discardReflexDecision({ ...request, ...answer }, discardReason, receivedAt);
+        else {
+          reflexQueue.push({ ...request, ...answer, action: response.action, model: response.model });
+          reflexQueue.sort((a, b) => a.target_at - b.target_at);
+          applyReflexQueue(receivedAt);
+        }
+      } else {
+        record("reflex_request_error", {
+          request_id: request.request_id, sent_at: runTime(request.sent_at),
+          observation_time: request.observation_time, target_time: request.target_time,
+          predicted_latency: request.predicted_latency, flap_epoch: request.flap_epoch,
+          received_at: runTime(receivedAt),
+          end_to_end_ms: Math.round(endToEnd * 100) / 100,
+          error: String(response?.error ?? "API応答を受け取れませんでした。").slice(0, 300),
+          failure_class: response?.failure_class ?? "harness", after_game_over: gameOver
+        });
+      }
+    } catch (error) {
+      record("reflex_request_error", {
+        request_id: request.request_id, sent_at: runTime(request.sent_at),
+        observation_time: request.observation_time, target_time: request.target_time,
+        predicted_latency: request.predicted_latency, flap_epoch: request.flap_epoch,
+        received_at: runTime(receivedAt),
+        end_to_end_ms: Math.round(endToEnd * 100) / 100,
+        error: String(error?.message ?? error).slice(0, 300),
+        failure_class: "harness", after_game_over: gameOver
+      });
+    }
+    if (gameOver) showStats();
+    if (drainingSession === request.session && reflexInFlight.size === 0) {
+      clearTimeout(drainTimer); drainTimer = null;
+      drainingSession = null;
+      send({ type: "run:stop", id: request.session }).catch(() => {});
+      controls();
+    }
+    showStats();
+  }
   function recordGameOver(now) {
     if (gameOverLogged) return;
+    const panel = game.querySelector('[data-panel="over"]');
+    const reflex = prefs.mode === "jev-reflex-neutral";
     record("game_over", {
-      score: score(), survival_ms: episodeStartedAt === null ? null : Math.round(now - episodeStartedAt), pending,
+      score: score(), survival_ms: episodeStartedAt === null ? null : Math.round(now - episodeStartedAt),
+      game_over_reason: panel?.textContent?.trim().slice(0, 200) || null,
+      pending: reflex ? reflexInFlight.size > 0 : pending,
       last_latency_ms: lastLatency, inflight_attempt: inflight?.attempt ?? null,
       inflight_elapsed_ms: inflight ? Math.round(now - inflight.startedAt) : null,
-      last_network_phase: inflight?.phase ?? null
+      last_network_phase: inflight?.phase ?? null,
+      inflight_request_ids: reflex ? [...reflexInFlight.keys()] : undefined,
+      last_applied_reflex_action: reflex ? reflexLastAction : undefined,
+      flap_epoch: reflex ? reflexFlapEpoch : undefined
     });
     gameOverLogged = true;
+    if (reflex) discardReflexQueue("game_over", now);
     expirePlan(now); clearPlan("game_over", now);
   }
   function tick(frameAt) {
@@ -366,13 +649,17 @@
       if (!game.querySelector('[data-panel="over"]')?.hidden) {
         recordGameOver(now);
         showStats();
-        if (!prefs.autoRestart) { stop(`ゲーム終了：${currentScore}点。開始で再挑戦できます。`, pending); return; }
+        if (!prefs.autoRestart) {
+          const retain = prefs.mode === "jev-reflex-neutral" ? reflexInFlight.size > 0 : pending;
+          stop(`ゲーム終了：${currentScore}点。開始で再挑戦できます。`, retain); return;
+        }
         if (!pending && requests >= prefs.maxRequests) { stop("ゲーム終了。API呼び出し上限に達したため停止しました。"); return; }
         if (restartAt === null) { restartAt = now + 650; message.textContent = `${currentScore}点で終了。再挑戦します…`; }
         if (now >= restartAt && !pending) {
           game.querySelector('[data-action="restart"]')?.click(); lastFlap = now; record("restart", { source: "auto", score: currentScore }); resetTracking(); gameOverLogged = false;
           episodeStartedAt = performance.now(); gameNumber++;
           if (prefs.mode === "jev-plan") planGapStartedAt = episodeStartedAt;
+          if (prefs.mode === "jev-reflex-neutral") reflexNextRequestAt = lastFlap + REFLEX_REQUEST_INTERVAL_MS;
         }
         timer = requestAnimationFrame(tick); return;
       }
@@ -408,18 +695,10 @@
         lastLoggedAt = sampledAt;
       }
       last = { time: sampledAt, y: frame.player.y, velocity, frame };
-      if (prefs.mode !== "local") {
-        // Observe before executing a click; request on the next frame so its reset velocity is reflected.
-        const clicked = prefs.mode === "jev-plan" && executePlan(performance.now());
-        if (prefs.mode === "jev-plan" && requests >= prefs.maxRequests && !pending && planExpiresAt === null) {
-          stop("最後のクリック予定を実行し、API呼び出し上限に達したため停止しました。"); return;
-        }
-        if (!clicked && !pending && requests < prefs.maxRequests && performance.now() >= nextDecisionAt) void ask(frame, velocity, sampledAt);
-      } else {
-        const next = frame.obstacles.find(o => o.x + o.width >= frame.player.x - frame.player.radius);
-        const target = next ? (next.gapTop + next.gapBottom) / 2 : frame.height / 2;
-        if (ChofuJev.flapNeeded(frame, target, velocity, sampledAt - lastFlap)) flap();
-      }
+      // v1.4.0 has one control path: only Jev's queued answer may cause a flap.
+      // After applying a flap, observe its new trajectory on the next frame.
+      const flapped = applyReflexQueue(performance.now());
+      if (!flapped) requestReflex(frame, velocity, sampledAt);
       showStats(); timer = requestAnimationFrame(tick);
     } catch (error) { stop(`読み取りエラー：${error.message}`); }
   }
@@ -457,6 +736,18 @@
   document.addEventListener("keydown", event => { if (event.key === "Escape" && running) stop(); });
   chrome.runtime.onMessage.addListener((msg, _sender, reply) => {
     if (msg.type === "decide:progress") {
+      const reflexRequest = msg.request_id ? reflexInFlight.get(msg.request_id) : null;
+      if (reflexRequest?.session === msg.id && (running || drainingSession === msg.id)) {
+        reflexRequest.phase = msg.phase;
+        requests = Math.max(requests, msg.requests ?? requests);
+        record("reflex_network_phase", {
+          request_id: msg.request_id, phase: msg.phase, worker_elapsed_ms: msg.elapsed_ms,
+          body_bytes: msg.body_bytes, http_status: msg.http_status,
+          in_flight: msg.in_flight, requests
+        });
+        showStats();
+        reply({ ok: true }); return false;
+      }
       if (inflight?.session === msg.id && inflight.attempt === msg.attempt && (running || drainingSession === msg.id)) {
         inflight.phase = msg.phase;
         requests = msg.requests;

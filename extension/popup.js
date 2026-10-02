@@ -10,7 +10,7 @@ async function background(message) {
 }
 function displayConfig(config) {
   hasKey = config.hasKey;
-  $("mode").value = config.mode; $("model").value = config.model;
+  $("model").value = config.model;
   $("endpoint").value = config.endpoint;
   $("limit").value = config.maxRequests; $("autoRestart").checked = config.autoRestart;
   $("keyStatus").textContent = hasKey ? "この接続先のキーは保存済みです。空欄ならそのキーを使います。" : "この接続先のキーは未設定です。不要な場合は空欄のままで使えます。";
@@ -18,12 +18,12 @@ function displayConfig(config) {
 async function save() {
   if (!$("settings").reportValidity()) throw new Error("設定値を確認してください。");
   const endpoint = ChofuJev.endpoint($("endpoint").value.trim());
-  if ($("mode").value !== "local" && endpoint !== "https://api.typesafe.ai/v1/systemone") {
+  if (endpoint !== "https://api.typesafe.ai/v1/systemone") {
     if (!await chrome.permissions.request({ origins: [ChofuJev.originPattern(endpoint)] })) throw new Error("接続先へのアクセスが許可されませんでした。");
   }
   const message = {
     type: "config:save",
-    config: { mode: $("mode").value, endpoint, model: $("model").value.trim(), maxRequests: Number($("limit").value), autoRestart: $("autoRestart").checked }
+    config: { endpoint, model: $("model").value.trim(), maxRequests: Number($("limit").value), autoRestart: $("autoRestart").checked }
   };
   if ($("apiKey").value.trim()) message.apiKey = $("apiKey").value.trim();
   const result = await background(message);
@@ -48,7 +48,7 @@ $("settings").addEventListener("submit", event => {
 });
 $("start").addEventListener("click", () => void action(async () => {
   await save(); setStatus("開始しています…"); await game("ui:stop"); await game("ui:start");
-  setStatus($("mode").value === "jev-plan" ? "Jevのクリック予定でプレイを開始しました。" : $("mode").value === "jev" ? "従来のJevクリック／待機方式で開始しました。" : "ローカルテストを開始しました（API未使用）。");
+  setStatus("開始しました。Jevが約50msごとにFLAP／WAITを判断します。");
 }));
 $("stop").addEventListener("click", () => void action(async () => { await game("ui:stop"); setStatus("停止しました。"); }));
 $("clearKey").addEventListener("click", () => void action(async () => {
