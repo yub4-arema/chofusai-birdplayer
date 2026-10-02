@@ -67,7 +67,13 @@
       questions: {
         action: {
           type: "choice",
-          instructions: "Choose ONLY whether to click now or wait. Coordinates use y increasing downward. A negative player.velocityY means the player is rising (moving UP); a positive value means falling (moving DOWN). The same sign rule applies to predicted_at_response.player_velocity_y. gravity is positive and accelerates DOWNWARD; flapVelocity is negative, so a click makes the player jump UP. Each click SETS vertical velocity to flapVelocity; it does not add a small impulse. Clicking again while already rising resets the full upward speed and prolongs the climb, so do not click merely because the last click occurred. since_last_click_ms is elapsed time since the last click. After a click, the normal upward phase lasts about abs(flapVelocity)/gravity seconds (about 287 ms in this game), then the player descends. predicted_at_response.estimated_click_apex_y_if_clicked_now estimates the player's center at the next jump apex if you click as this response arrives. If it is below vertical_bounds.safe_center_y_min, that click would hit the upper wall; estimated_click_upper_wall_margin_px shows the clearance. predicted_if_wait_until_next_decision estimates where the player and obstacles will be when the next Jev answer arrives if you wait now. Its upper_wall_margin_px and lower_wall_margin_px are the minimum clearances along that wait path, including the player's radius; a negative value means waiting will hit that wall before you can act again. If the no-click path reaches a wall before the next answer, click now when the estimated click apex stays safely below the upper wall. If waiting remains safe, compare the projected player and obstacle gap positions to decide whether a click is needed now or can wait; do not over-click. Game over occurs if the player's top (player.y - player.radius) goes above vertical_bounds.top_wall_y or the bottom (player.y + player.radius) goes below vertical_bounds.bottom_wall_y. vertical_bounds.safe_center_y_min and safe_center_y_max are the allowed range for the player's center, including radius. Keep the entire player inside each obstacle opening too: gapTop is the opening's upper edge, gapBottom its lower edge. Use current and projected position/direction, both vertical out boundaries, and the next gaps to time the next single click. The extension executes your click/wait choice directly. Do not choose a route or target height, and do not give explanations.",
+          instructions: [
+            "Choose ONLY whether to click now or wait. Coordinates use y increasing downward. A negative player.velocityY means rising (UP); positive means falling (DOWN). gravity accelerates DOWNWARD. A click SETS velocity to the negative flapVelocity; it does not add an impulse. Clicking while already rising resets the full upward speed and prolongs the climb.",
+            "predicted_at_response is the estimated state when this answer arrives. predicted_if_click_until_next_decision and predicted_if_wait_until_next_decision simulate the full parabola from then until another answer could arrive. hits_upper_wall, hits_lower_wall, and hits_obstacle explicitly indicate a predicted collision during that interval; the wall margins include the player's radius, and obstacle_contacts show whether the player's full circle fits through a gap during horizontal overlap.",
+            "predicted_next_obstacle_crossings estimates the vertical path through each approaching gap. time_to_overlap_start_ms tells when the player first overlaps that obstacle horizontally; additional_decisions_before_overlap estimates how many answers can arrive before then. if_click_now shows the path if you click as this answer arrives; if_wait_then_click shows the path if you wait for one more answer and click then; if_wait_no_click shows the path if you continue without clicking. A negative upper_gap_margin_px or lower_gap_margin_px means the player hits that edge during the overlap. A negative wall margin means the path hits that wall before or during the crossing.",
+            "Compare click-now against wait-then-click at the actual gap crossing. Click now if waiting makes a safe crossing impossible but clicking now can clear it. Wait if the next answer still arrives in time and waiting preserves a safe crossing. Avoid repeated clicks when the wait path remains safe. If both paths collide, choose the one that stays in bounds and within the gap longer.",
+            "Game over occurs when the player's top goes above vertical_bounds.top_wall_y, bottom goes below vertical_bounds.bottom_wall_y, or the player hits an obstacle. vertical_bounds.safe_center_y_min and safe_center_y_max are the allowed center range including radius. gapTop and gapBottom are the opening edges; keep the whole player inside them. The extension executes your click/wait choice directly. Do not choose a route or target height, and do not give explanations."
+          ].join(" "),
           criteria: {
             click: "Send one flap click immediately when your response is received.",
             wait: "Do not click before the next observation."
@@ -122,21 +128,126 @@
     const predictedY = number(predicted.player_y, -1000, 10000);
     const clickApexY = number(predictedY - flapVelocity ** 2 / (2 * gravity), -10000, 10000);
     const decisionHorizonMs = number(input.decision_horizon_ms, 0, 1000);
-    const waitHorizonMs = decisionHorizonMs + 160;
-    const waitSeconds = waitHorizonMs / 1000;
-    const waitEndY = predictedY + predictedVelocityY * waitSeconds + 0.5 * gravity * waitSeconds ** 2;
-    const waitEndVelocityY = predictedVelocityY + gravity * waitSeconds;
-    const waitApexSeconds = -predictedVelocityY / gravity;
-    const waitApexY = predictedY + predictedVelocityY * waitApexSeconds + 0.5 * gravity * waitApexSeconds ** 2;
-    const waitMinY = predictedVelocityY < 0 && waitApexSeconds <= waitSeconds
-      ? Math.min(predictedY, waitEndY, waitApexY)
-      : Math.min(predictedY, waitEndY);
-    const waitMaxY = Math.max(predictedY, waitEndY);
+    const decisionIntervalMs = number(input.decision_interval_ms ?? 20, 0, 1000);
+    const nextDecisionHorizonMs = decisionHorizonMs + decisionIntervalMs;
     const speedX = number(input.physics?.speedX, 50, 500);
-    const shiftObstacle = o => {
-      const safe = obstacle(o);
-      return safe == null ? null : { ...safe, x: number(safe.x - speedX * waitSeconds, -10000, 10000) };
+    const responseObstacles = [
+      ["next", obstacle(predicted.next)], ["following", obstacle(predicted.following)]
+    ].filter(([, value]) => value !== null);
+    const noClickYAt = seconds => predictedY + predictedVelocityY * seconds + 0.5 * gravity * seconds ** 2;
+    const pathYAt = (milliseconds, clickAtMs = null) => {
+      const seconds = milliseconds / 1000;
+      if (clickAtMs === null || milliseconds < clickAtMs) return noClickYAt(seconds);
+      const clickSeconds = clickAtMs / 1000;
+      const yAtClick = noClickYAt(clickSeconds);
+      const afterClick = seconds - clickSeconds;
+      return yAtClick + flapVelocity * afterClick + 0.5 * gravity * afterClick ** 2;
     };
+    const pathVelocityAt = (milliseconds, clickAtMs = null) => {
+      if (clickAtMs !== null && milliseconds >= clickAtMs) return flapVelocity + gravity * (milliseconds - clickAtMs) / 1000;
+      return predictedVelocityY + gravity * milliseconds / 1000;
+    };
+    const extrema = (startMs, endMs, clickAtMs = null) => {
+      const start = startMs / 1000, end = endMs / 1000;
+      const switchTime = clickAtMs === null ? Infinity : clickAtMs / 1000;
+      const cuts = [start, end];
+      if (switchTime > start && switchTime < end) cuts.push(switchTime);
+      cuts.sort((a, b) => a - b);
+      const candidates = [...cuts];
+      for (let i = 0; i < cuts.length - 1; i++) {
+        const a = cuts[i], b = cuts[i + 1], midpoint = (a + b) / 2;
+        const afterClick = switchTime !== Infinity && midpoint >= switchTime;
+        const originTime = afterClick ? switchTime : 0;
+        const originVelocity = afterClick ? flapVelocity : predictedVelocityY;
+        const apexTime = originTime - originVelocity / gravity;
+        if (apexTime >= a && apexTime <= b) candidates.push(apexTime);
+      }
+      const values = candidates.map(seconds => pathYAt(seconds * 1000, clickAtMs));
+      return { min_y: Math.min(...values), max_y: Math.max(...values) };
+    };
+    const shiftObstacle = (value, horizonMs) => value == null ? null : ({
+      ...value, x: number(value.x - speedX * horizonMs / 1000, -10000, 10000)
+    });
+    const pathSummary = clickAtMs => {
+      const duration = nextDecisionHorizonMs;
+      const vertical = extrema(0, duration, clickAtMs);
+      const upperWallMargin = vertical.min_y - playerRadius;
+      const lowerWallMargin = screenHeight - playerRadius - vertical.max_y;
+      const contacts = [];
+      for (const [which, value] of responseObstacles) {
+        const enterMs = (value.x - playerX - playerRadius) / speedX * 1000;
+        const exitMs = (value.x + value.width - playerX + playerRadius) / speedX * 1000;
+        if (exitMs < 0 || enterMs > duration) continue;
+        const startMs = Math.max(0, enterMs), endMs = Math.min(duration, exitMs);
+        if (endMs < startMs) continue;
+        const overlap = extrema(startMs, endMs, clickAtMs);
+        const upperGapMargin = overlap.min_y - (value.gapTop + playerRadius);
+        const lowerGapMargin = value.gapBottom - playerRadius - overlap.max_y;
+        contacts.push({
+          obstacle: which,
+          overlap_start_ms: number(startMs, 0, 10000),
+          overlap_end_ms: number(endMs, 0, 10000),
+          upper_gap_margin_px: number(upperGapMargin, -30000, 30000),
+          lower_gap_margin_px: number(lowerGapMargin, -30000, 30000),
+          hits_upper_gap: upperGapMargin < 0,
+          hits_lower_gap: lowerGapMargin < 0
+        });
+      }
+      const endY = pathYAt(duration, clickAtMs), endVelocityY = pathVelocityAt(duration, clickAtMs);
+      return {
+        additional_horizon_ms: duration,
+        player_y: number(endY, -30000, 30000),
+        player_velocity_y: number(endVelocityY, -10000, 10000),
+        vertical_direction: endVelocityY < 0 ? "up" : "down",
+        upper_wall_margin_px: number(upperWallMargin, -30000, 30000),
+        lower_wall_margin_px: number(lowerWallMargin, -30000, 30000),
+        hits_upper_wall: upperWallMargin < 0,
+        hits_lower_wall: lowerWallMargin < 0,
+        hits_obstacle: contacts.some(contact => contact.hits_upper_gap || contact.hits_lower_gap),
+        obstacle_contacts: contacts,
+        next: shiftObstacle(responseObstacles.find(([which]) => which === "next")?.[1] ?? null, duration),
+        following: shiftObstacle(responseObstacles.find(([which]) => which === "following")?.[1] ?? null, duration)
+      };
+    };
+    const crossingForecast = (which, value) => {
+      const rawEntryMs = (value.x - playerX - playerRadius) / speedX * 1000;
+      const rawExitMs = (value.x + value.width - playerX + playerRadius) / speedX * 1000;
+      if (rawExitMs < 0 || rawEntryMs > 5000) return null;
+      const startMs = Math.max(0, rawEntryMs), endMs = Math.max(startMs, rawExitMs);
+      const pathAtCrossing = clickAtMs => {
+        const overlap = extrema(startMs, endMs, clickAtMs);
+        const entire = extrema(0, endMs, clickAtMs);
+        const upperGapMargin = overlap.min_y - (value.gapTop + playerRadius);
+        const lowerGapMargin = value.gapBottom - playerRadius - overlap.max_y;
+        const upperWallMargin = entire.min_y - playerRadius;
+        const lowerWallMargin = screenHeight - playerRadius - entire.max_y;
+        return {
+          player_y_at_overlap_start: number(pathYAt(startMs, clickAtMs), -30000, 30000),
+          player_y_at_overlap_end: number(pathYAt(endMs, clickAtMs), -30000, 30000),
+          upper_gap_margin_px: number(upperGapMargin, -30000, 30000),
+          lower_gap_margin_px: number(lowerGapMargin, -30000, 30000),
+          hits_upper_gap: upperGapMargin < 0,
+          hits_lower_gap: lowerGapMargin < 0,
+          upper_wall_margin_before_crossing_px: number(upperWallMargin, -30000, 30000),
+          lower_wall_margin_before_crossing_px: number(lowerWallMargin, -30000, 30000),
+          hits_wall_before_or_during_crossing: upperWallMargin < 0 || lowerWallMargin < 0
+        };
+      };
+      return {
+        obstacle: which,
+        time_to_overlap_start_ms: number(startMs, 0, 10000),
+        time_to_overlap_end_ms: number(endMs, 0, 10000),
+        additional_decisions_before_overlap: Math.max(0, Math.ceil(startMs / Math.max(1, nextDecisionHorizonMs)) - 1),
+        gapTop: value.gapTop,
+        gapBottom: value.gapBottom,
+        if_click_now: pathAtCrossing(0),
+        if_wait_then_click: pathAtCrossing(nextDecisionHorizonMs),
+        if_wait_no_click: pathAtCrossing(null)
+      };
+    };
+    const waitPath = pathSummary(null);
+    const clickPath = pathSummary(0);
+    const crossings = responseObstacles.map(([which, value]) => crossingForecast(which, value)).filter(Boolean);
     return {
       screen: { width: screenWidth, height: screenHeight },
       player: { x: playerX, y: playerY, radius: playerRadius, velocityY,
@@ -151,25 +262,20 @@
       },
       since_last_click_ms: number(input.since_last_click_ms, 0, 100000),
       decision_horizon_ms: decisionHorizonMs,
+      decision_interval_ms: decisionIntervalMs,
+      sample_age_ms: number(input.sample_age_ms ?? 0, 0, 1000),
       predicted_at_response: {
         player_y: predictedY,
         player_velocity_y: predictedVelocityY,
         vertical_direction: predictedVelocityY < 0 ? "up" : "down",
         estimated_click_apex_y_if_clicked_now: clickApexY,
         estimated_click_upper_wall_margin_px: number(clickApexY - playerRadius, -10000, 10000),
-        next: obstacle(predicted.next),
-        following: obstacle(predicted.following)
+        next: responseObstacles.find(([which]) => which === "next")?.[1] ?? null,
+        following: responseObstacles.find(([which]) => which === "following")?.[1] ?? null
       },
-      predicted_if_wait_until_next_decision: {
-        additional_horizon_ms: waitHorizonMs,
-        player_y: number(waitEndY, -30000, 30000),
-        player_velocity_y: number(waitEndVelocityY, -10000, 10000),
-        vertical_direction: waitEndVelocityY < 0 ? "up" : "down",
-        upper_wall_margin_px: number(waitMinY - playerRadius, -30000, 30000),
-        lower_wall_margin_px: number(screenHeight - playerRadius - waitMaxY, -30000, 30000),
-        next: shiftObstacle(predicted.next),
-        following: shiftObstacle(predicted.following)
-      }
+      predicted_if_click_until_next_decision: clickPath,
+      predicted_if_wait_until_next_decision: waitPath,
+      predicted_next_obstacle_crossings: crossings
     };
   }
   globalThis.ChofuJev = Object.freeze({ observe, flapNeeded, buildRequest, parseDecision, sanitizeState, endpoint, originPattern });

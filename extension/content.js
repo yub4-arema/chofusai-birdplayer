@@ -29,7 +29,7 @@
   const message = shadow.getElementById("message"), stats = shadow.getElementById("stats");
   const startButton = shadow.getElementById("start"), stopButton = shadow.getElementById("stop");
   const logButton = shadow.getElementById("log"), logData = shadow.getElementById("logData");
-  const DECISION_INTERVAL_MS = 160, MAX_ACTION_LATENCY_MS = 900;
+  const DECISION_INTERVAL_MS = 20, MAX_ACTION_LATENCY_MS = 900;
   const LOG_INTERVAL_MS = 50, MAX_LOG_EVENTS = 2400;
   let running = false, generation = 0, timer = null, session = null, prefs = null;
   let last = null, lastFlap = 0, pending = false, nextDecisionAt = 0;
@@ -98,8 +98,9 @@
       return { ok: false, error: error.message };
     }
   }
-  function decisionState(frame, velocity) {
-    const horizon = Math.max(100, Math.min(750, lastLatency ?? 250));
+  function decisionState(frame, velocity, sampledAt) {
+    const sampleAge = Math.max(0, performance.now() - sampledAt);
+    const horizon = Math.max(100, Math.min(750, (lastLatency ?? 250) + sampleAge));
     const seconds = horizon / 1000;
     const gravity = 1500 * frame.scale, speedX = 165 * frame.scale;
     const thresholdX = frame.player.x - frame.player.radius;
@@ -114,8 +115,10 @@
       physics: { gravity, flapVelocity: -430 * frame.scale, speedX },
       next: upcoming[0] ?? null,
       following: upcoming[1] ?? null,
-      since_last_click_ms: Math.max(0, performance.now() - lastFlap),
+      since_last_click_ms: Math.max(0, sampledAt - lastFlap),
       decision_horizon_ms: horizon,
+      decision_interval_ms: DECISION_INTERVAL_MS,
+      sample_age_ms: sampleAge,
       predicted_at_response: {
         player_y: frame.player.y + velocity * seconds + 0.5 * gravity * seconds ** 2,
         player_velocity_y: velocity + gravity * seconds,
@@ -124,14 +127,14 @@
       }
     };
   }
-  async function ask(frame, velocity) {
+  async function ask(frame, velocity, sampledAt) {
     const epoch = generation;
     pending = true;
     const attempt = ++attemptNumber;
     const requestStartedAt = performance.now();
     let state, diagnosticState = null;
     try {
-      state = decisionState(frame, velocity);
+      state = decisionState(frame, velocity, sampledAt);
       diagnosticState = ChofuJev.sanitizeState(state);
       record("request", { attempt, state: diagnosticState });
       const response = await send({ type: "decide", id: session, state });
@@ -191,31 +194,34 @@
         }
         timer = setTimeout(tick, 20); return;
       }
+      const sampledAt = performance.now();
       const frame = ChofuJev.observe(ctx.getImageData(0, 0, canvas.width, canvas.height), rect.width, rect.height);
       if (!frame) { stop("赤いプレイヤーを読み取れませんでした。ページを再読み込みしてください。"); return; }
-      const dt = last ? (now - last.time) / 1000 : 0;
+      const dt = last ? (sampledAt - last.time) / 1000 : 0;
       const velocitySource = last && dt > 0 && dt < 0.2 ? "frame-delta" : "physics-since-click";
       let velocity = velocitySource === "frame-delta"
         ? (frame.player.y - last.y) / dt
-        : -430 * frame.scale + 1500 * frame.scale * Math.max(0, (now - lastFlap) / 1000);
+        : -430 * frame.scale + 1500 * frame.scale * Math.max(0, (sampledAt - lastFlap) / 1000);
       velocity = Math.max(-500 * frame.scale, Math.min(1000 * frame.scale, velocity));
-      if (now - lastLoggedAt >= LOG_INTERVAL_MS) {
+      if (sampledAt - lastLoggedAt >= LOG_INTERVAL_MS) {
         record("observation", {
           score: currentScore, pending, velocity_source: velocitySource,
+          sampled_at_ms: Math.round(sampledAt - runStartedAt),
+          sample_age_ms: Math.round((performance.now() - sampledAt) * 100) / 100,
           screen: { width: frame.width, height: frame.height, scale: frame.scale },
           player: { ...frame.player, velocityY: Math.round(velocity * 100) / 100 },
           obstacles: frame.obstacles.slice(0, 8)
         });
-        lastLoggedAt = now;
+        lastLoggedAt = sampledAt;
       }
       if (prefs.mode === "jev") {
-        if (!pending && now >= nextDecisionAt) void ask(frame, velocity);
+        if (!pending && performance.now() >= nextDecisionAt) void ask(frame, velocity, sampledAt);
       } else {
         const next = frame.obstacles.find(o => o.x + o.width >= frame.player.x - frame.player.radius);
         const target = next ? (next.gapTop + next.gapBottom) / 2 : frame.height / 2;
-        if (ChofuJev.flapNeeded(frame, target, velocity, now - lastFlap)) flap();
+        if (ChofuJev.flapNeeded(frame, target, velocity, sampledAt - lastFlap)) flap();
       }
-      last = { time: now, y: frame.player.y };
+      last = { time: sampledAt, y: frame.player.y };
       showStats(); timer = setTimeout(tick, 20);
     } catch (error) { stop(`読み取りエラー：${error.message}`); }
   }
