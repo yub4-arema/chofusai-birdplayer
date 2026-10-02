@@ -67,7 +67,7 @@
       questions: {
         action: {
           type: "choice",
-          instructions: "Choose ONLY whether to click now or wait. Coordinates use y increasing downward. A negative player.velocityY means the player is rising (moving UP); a positive value means falling (moving DOWN). The same sign rule applies to predicted_at_response.player_velocity_y. gravity is positive and accelerates DOWNWARD; flapVelocity is negative, so a click makes the player jump UP. Game over occurs if the player's top (player.y - player.radius) goes above vertical_bounds.top_wall_y or the bottom (player.y + player.radius) goes below vertical_bounds.bottom_wall_y. vertical_bounds.safe_center_y_min and safe_center_y_max are the allowed range for the player's center, including radius. Keep the entire player inside each obstacle opening too: gapTop is the opening's upper edge, gapBottom its lower edge. Use current and predicted position/direction, both vertical out boundaries, and the next gaps to time the next single click. The extension executes your click/wait choice directly. Do not choose a route or target height, and do not give explanations.",
+          instructions: "Choose ONLY whether to click now or wait. Coordinates use y increasing downward. A negative player.velocityY means the player is rising (moving UP); a positive value means falling (moving DOWN). The same sign rule applies to predicted_at_response.player_velocity_y. gravity is positive and accelerates DOWNWARD; flapVelocity is negative, so a click makes the player jump UP. Each click SETS vertical velocity to flapVelocity; it does not add a small impulse. Clicking again while already rising resets the full upward speed and prolongs the climb, so do not click just because the last click occurred; use the observed direction and predicted_at_response. since_last_click_ms is elapsed time since the last click. After a click, the normal upward phase lasts about abs(flapVelocity)/gravity seconds (about 287 ms in this game), then the player descends. predicted_at_response.estimated_click_apex_y_if_clicked_now estimates the player's center at the next jump apex if you click as this response arrives. If it is below vertical_bounds.safe_center_y_min, that click would hit the upper wall; estimated_click_upper_wall_margin_px shows the clearance. Game over occurs if the player's top (player.y - player.radius) goes above vertical_bounds.top_wall_y or the bottom (player.y + player.radius) goes below vertical_bounds.bottom_wall_y. vertical_bounds.safe_center_y_min and safe_center_y_max are the allowed range for the player's center, including radius. Keep the entire player inside each obstacle opening too: gapTop is the opening's upper edge, gapBottom its lower edge. Use current and predicted position/direction, both vertical out boundaries, and the next gaps to time the next single click. The extension executes your click/wait choice directly. Do not choose a route or target height, and do not give explanations.",
           criteria: {
             click: "Send one flap click immediately when your response is received.",
             wait: "Do not click before the next observation."
@@ -116,12 +116,16 @@
     const playerY = number(input.player?.y, 0, 10000);
     const playerRadius = number(input.player?.radius, 1, 100);
     const velocityY = number(input.player?.velocityY, -5000, 5000);
+    const gravity = number(input.physics?.gravity, 500, 3000);
+    const flapVelocity = number(input.physics?.flapVelocity, -1000, -100);
     const predictedVelocityY = number(predicted.player_velocity_y, -5000, 5000);
+    const predictedY = number(predicted.player_y, -1000, 10000);
+    const clickApexY = number(predictedY - flapVelocity ** 2 / (2 * gravity), -10000, 10000);
     return {
       screen: { width: screenWidth, height: screenHeight },
       player: { x: playerX, y: playerY, radius: playerRadius, velocityY,
         vertical_direction: velocityY < 0 ? "up" : "down" },
-      physics: { gravity: number(input.physics?.gravity, 500, 3000), flapVelocity: number(input.physics?.flapVelocity, -1000, -100), speedX: number(input.physics?.speedX, 50, 500) },
+      physics: { gravity, flapVelocity, speedX: number(input.physics?.speedX, 50, 500) },
       next: obstacle(input.next), following: obstacle(input.following),
       vertical_bounds: {
         top_wall_y: 0,
@@ -132,9 +136,11 @@
       since_last_click_ms: number(input.since_last_click_ms, 0, 100000),
       decision_horizon_ms: number(input.decision_horizon_ms, 0, 1000),
       predicted_at_response: {
-        player_y: number(predicted.player_y, -1000, 10000),
+        player_y: predictedY,
         player_velocity_y: predictedVelocityY,
         vertical_direction: predictedVelocityY < 0 ? "up" : "down",
+        estimated_click_apex_y_if_clicked_now: clickApexY,
+        estimated_click_upper_wall_margin_px: number(clickApexY - playerRadius, -10000, 10000),
         next: obstacle(predicted.next),
         following: obstacle(predicted.following)
       }

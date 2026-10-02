@@ -153,8 +153,10 @@
       }
       const frame = ChofuJev.observe(ctx.getImageData(0, 0, canvas.width, canvas.height), rect.width, rect.height);
       if (!frame) { stop("赤いプレイヤーを読み取れませんでした。ページを再読み込みしてください。"); return; }
-      const dt = last ? (now - last.time) / 1000 : 0.04;
-      let velocity = last && dt < 0.2 ? (frame.player.y - last.y) / dt : 0;
+      const dt = last ? (now - last.time) / 1000 : 0;
+      let velocity = last && dt > 0 && dt < 0.2
+        ? (frame.player.y - last.y) / dt
+        : -430 * frame.scale + 1500 * frame.scale * Math.max(0, (now - lastFlap) / 1000);
       velocity = Math.max(-500 * frame.scale, Math.min(1000 * frame.scale, velocity));
       if (prefs.mode === "jev") {
         if (!pending && now >= nextDecisionAt) void ask(frame, velocity);
