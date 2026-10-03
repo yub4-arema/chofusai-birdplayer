@@ -18,7 +18,7 @@
       button:disabled{opacity:.5;cursor:default}button:focus-visible{outline:3px solid #fbc96b;outline-offset:3px}
       #stop{background:transparent;color:#edf6ff}#message{white-space:pre-wrap}
     </style>
-    <div class="box"><div class="row"><strong>調布祭 Flappy × Jev</strong><div><button id="start">開始</button> <button id="stop" disabled>停止</button></div></div>
+    <div class="box"><div class="row"><strong>調布祭 Flappy × Jev <span style="font-size:11px;color:#a9c6d9">r2</span></strong><div><button id="start">開始</button> <button id="stop" disabled>停止</button></div></div>
     <p id="message" role="status" aria-live="polite">拡張機能からAPIキー・要求間隔を設定して、開始してください。</p>
     <small id="stats">クリックするか待つかはJevが選びます。</small></div>`;
   game.before(host);
@@ -26,10 +26,10 @@
   const startButton = shadow.getElementById('start'), stopButton = shadow.getElementById('stop');
   const send = value => chrome.runtime.sendMessage(value);
   const maxInFlight = ChofuJev.REFLEX_MAX_IN_FLIGHT, maxLate = ChofuJev.REFLEX_MAX_LATE_MS;
-  let running = false, generation = 0, timer = null, session = null, prefs = null;
+  let running = false, generation = 0, timer = null, actionTimer = null, session = null, prefs = null;
   let inFlight = new Map(), queue = [], nextRequestAt = 0, flapEpoch = 0, gameNumber = 0;
   let last = null, lastFlap = 0, velocity = null, latencySamples = [], restartAt = null;
-  let requests = 0, decisions = 0, lastLatency = null, best = 0, bestKey = '', runStartedAt = 0;
+  let requests = 0, decisions = 0, lastLatency = null, best = 0, bestKey = '', runStartedAt = 0, lastPhysicsAt = null, frameIntervals = [];
   const runTime = time => Math.max(0, time - runStartedAt);
   const score = () => Number(game.querySelector('[data-score]')?.textContent || 0) || 0;
   const gameOver = () => Boolean(game.querySelector('[data-panel="over"]') && !game.querySelector('[data-panel="over"]').hidden);
@@ -39,7 +39,7 @@
   }
   function stop(reason = '停止しました。') {
     running = false; generation++;
-    cancelAnimationFrame(timer); timer = null;
+    cancelAnimationFrame(timer); timer = null; clearTimeout(actionTimer); actionTimer = null;
     inFlight.clear(); queue = []; last = null; restartAt = null;
     const oldSession = session; session = null;
     if (oldSession) send({ type: 'run:stop', id: oldSession }).catch(() => {});
@@ -51,7 +51,8 @@
     velocity = -430 * (last?.frame.scale ?? Math.max(.7, Math.min(1.15, stage.clientHeight / 360)));
   }
   function resetTracking() {
-    last = null; velocity = null; queue = []; flapEpoch = 0; restartAt = null;
+    clearTimeout(actionTimer); actionTimer = null;
+    last = null; lastPhysicsAt = null; frameIntervals = []; velocity = null; queue = []; flapEpoch = 0; restartAt = null;
     nextRequestAt = lastFlap + prefs.requestIntervalMs;
   }
   async function start() {
@@ -71,18 +72,45 @@
       bestKey = `chofu-jev-best:${prefs.endpoint}|${prefs.model}`;
       try { best = Number(localStorage.getItem(bestKey) || 0) || 0; } catch { best = 0; }
       stage.scrollIntoView({ block: 'center', behavior: 'instant' }); stage.focus({ preventScroll: true });
+      // Measure the connection before the initial standard game input. These
+      // replies calibrate timing only and are never replayed as game actions.
+      for (let index = 0; index < Math.min(3, prefs.maxRequests - 1); index++) {
+        message.textContent = `応答速度を確認しています… ${index + 1}/3`;
+        const sampledAt = performance.now(), rect = stage.getBoundingClientRect();
+        const frame = ChofuJev.observe(ctx.getImageData(0, 0, canvas.width, canvas.height), rect.width, rect.height);
+        if (!frame) throw Error('ゲーム画面を読み取れませんでした。');
+        const at = runTime(sampledAt);
+        const state = ChofuJev.predictReflexState({
+          screen: { height: frame.height }, player: { ...frame.player, velocityY: 0 }, game: { score: score() },
+          physics: { gravity: 1500 * frame.scale, flapVelocity: -430 * frame.scale, speedX: 165 * frame.scale },
+          next_obstacle: null, following_obstacle: null
+        }, 0, at, 0, at, prefs.requestIntervalMs, 0, at);
+        requests++; update();
+        const answer = await send({ type: 'decide:reflex', id: session, request_id: crypto.randomUUID(), sent_at: at, observation_time: at, target_time: at, predicted_latency: 0, flap_epoch: 0, state });
+        if (epoch !== generation) return { ok: false, error: '開始をキャンセルしました。' };
+        if (!answer?.ok) throw Error(answer?.error || 'Jevに接続できませんでした。');
+        lastLatency = Math.round(performance.now() - sampledAt);
+        latencySamples.push(lastLatency); decisions++;
+      }
+
+      if (latencySamples.length === 3) latencySamples.shift();
       const restart = game.querySelector('[data-action="restart"]');
       if (restart) restart.click(); else flap();
       lastFlap = performance.now(); gameNumber = 1; resetTracking();
       message.textContent = `${prefs.model}が操作します。要求間隔は${prefs.requestIntervalMs}msです。`;
       update(); timer = requestAnimationFrame(tick); return { ok: true };
-    } catch (error) { stop(error.message); return { ok: false, error: error.message }; }
+    } catch (error) { if (epoch === generation) stop(error.message); return { ok: false, error: error.message }; }
+  }
+  function scheduleAction() {
+    clearTimeout(actionTimer); actionTimer = null;
+    if (!running || !queue.length) return;
+    actionTimer = setTimeout(() => { actionTimer = null; apply(performance.now()); }, Math.max(0, queue[0].targetAt - performance.now()));
   }
   function apply(now) {
     let flapped = false;
     while (queue.length && queue[0].targetAt <= now) {
       const item = queue.shift();
-      if (item.gameNumber !== gameNumber || ChofuJev.reflexDiscardReason({ flap_epoch: item.epoch, target_at: item.targetAt }, flapEpoch, now, gameOver(), maxLate)) continue;
+      if (item.gameNumber !== gameNumber || ChofuJev.reflexDiscardReason({ flap_epoch: item.epoch, target_at: item.targetAt }, flapEpoch, now, gameOver(), Math.min(maxLate, prefs.requestIntervalMs))) continue;
       if (item.action === 'FLAP') {
         flap(); flapEpoch++; flapped = true;
         queue = queue.filter(value => value.epoch === flapEpoch);
@@ -90,6 +118,7 @@
       }
       message.textContent = `${prefs.model}：${item.action}`;
     }
+    scheduleAction();
     return flapped;
   }
   function request(frame, sampledAt) {
@@ -97,13 +126,16 @@
     if (sentAt < nextRequestAt) return;
     nextRequestAt += (Math.floor((sentAt - nextRequestAt) / interval) + 1) * interval;
     if (requests >= prefs.maxRequests || inFlight.size >= maxInFlight) return;
-    const predictedLatency = ChofuJev.estimateLatency(latencySamples).typical_ms;
+    const latency = ChofuJev.estimateLatency(latencySamples);
+    // One startup spike must not push every target far beyond the typical
+    // connection. Preserve at most one request interval of extra lead.
+    const predictedLatency = Math.min(latency.cautious_ms, latency.typical_ms + interval);
     const targetAt = sentAt + predictedLatency;
     const upcoming = frame.obstacles.filter(o => o.x + o.width >= frame.player.x - frame.player.radius).sort((a,b) => a.x-b.x).slice(0,2);
     const state = ChofuJev.predictReflexState({
       screen: { height: frame.height }, player: { ...frame.player, velocityY: velocity },
       game: { score: score() },
-      physics: { gravity: 1500*frame.scale, flapVelocity: -430*frame.scale, speedX: 165*frame.scale, max_frame_step_ms: 50, obstacle_radius_factor: .9 },
+      physics: { gravity: 1500*frame.scale, flapVelocity: -430*frame.scale, speedX: 165*frame.scale, max_frame_step_ms: 50, obstacle_radius_factor: .9, frame_interval_ms: frameIntervals.length ? [...frameIntervals].sort((a,b)=>a-b)[Math.floor(frameIntervals.length / 2)] : 1000 / 60 },
       next_obstacle: upcoming[0] ?? null, following_obstacle: upcoming[1] ?? null
     }, Math.max(0,targetAt-sampledAt), runTime(targetAt), predictedLatency, runTime(sampledAt), interval, flapEpoch, runTime(lastFlap));
     const item = { id: crypto.randomUUID(), epoch: flapEpoch, gameNumber, targetAt, generation, session };
@@ -113,8 +145,8 @@
         if (!running || item.generation !== generation || item.session !== session) return;
         inFlight.delete(item.id);
         if (!response?.ok) { stop(response?.error || 'Jevに接続できませんでした。'); return; }
-        lastLatency = response.latencyMs; latencySamples.push(lastLatency); if (latencySamples.length>20) latencySamples.shift(); decisions++;
-        if (item.gameNumber === gameNumber && !ChofuJev.reflexDiscardReason({flap_epoch:item.epoch,target_at:item.targetAt},flapEpoch,performance.now(),gameOver(),maxLate)) {
+        lastLatency = Math.round(performance.now() - sentAt); latencySamples.push(lastLatency); if (latencySamples.length>20) latencySamples.shift(); decisions++;
+        if (item.gameNumber === gameNumber && !ChofuJev.reflexDiscardReason({flap_epoch:item.epoch,target_at:item.targetAt},flapEpoch,performance.now(),gameOver(),Math.min(maxLate,prefs.requestIntervalMs))) {
           queue.push({ ...item, action: response.action }); queue.sort((a,b)=>a.targetAt-b.targetAt); apply(performance.now());
         }
         update();
@@ -139,19 +171,31 @@
         }
         update(); timer=requestAnimationFrame(tick); return;
       }
-      const frame=ChofuJev.observe(ctx.getImageData(0,0,canvas.width,canvas.height),rect.width,rect.height);
-      if (!frame) throw Error('ゲーム画面を読み取れませんでした。');
-      if (last && (Math.abs(frame.width-last.frame.width)>3 || Math.abs(frame.height-last.frame.height)>3)) { stop('画面サイズが変わったため停止しました。'); return; }
-      const dt=Math.max(0,Math.min(.05,(frameAt-(last?.time??lastFlap))/1000));
-      velocity ??= -430*frame.scale; velocity += 1500*frame.scale*dt;
-      if (!last) {
-        const gravity=1500*frame.scale, flapVelocity=-430*frame.scale;
-        const d=flapVelocity**2+4*gravity*(frame.player.y-frame.height/2);
-        const first=d>=0?(-flapVelocity-Math.sqrt(d))/(2*gravity):-1;
-        if (first>=0 && first<=.051) velocity=flapVelocity+gravity*Math.min(.05,first);
+      const scale = Math.max(.7, Math.min(1.15, rect.height / 360));
+      if (last && (Math.abs(rect.width-last.frame.width)>3 || Math.abs(rect.height-last.frame.height)>3)) { stop('画面サイズが変わったため停止しました。'); return; }
+      if (lastPhysicsAt === null) {
+        const frame = ChofuJev.observe(ctx.getImageData(0,0,canvas.width,canvas.height),rect.width,rect.height);
+        if (!frame) throw Error('ゲーム画面を読み取れませんでした。');
+        const gravity = 1500 * scale, impulse = -430 * scale;
+        const discriminant = impulse ** 2 + 4 * gravity * (frame.player.y - frame.height / 2);
+        const elapsed = discriminant >= 0 ? (-impulse - Math.sqrt(discriminant)) / (2 * gravity) : 0;
+        velocity = impulse + gravity * Math.max(0, Math.min(.05, elapsed));
+        last = { time: frameAt, frame };
+      } else {
+        const wallStep = Math.max(0, frameAt - lastPhysicsAt);
+        if (wallStep >= 3 && wallStep <= 500) { frameIntervals.push(wallStep); if (frameIntervals.length > 20) frameIntervals.shift(); }
+        velocity += 1500 * scale * Math.min(.05, wallStep / 1000);
       }
-      last={time:frameAt,frame};
-      if (!apply(performance.now())) request(frame,frameAt);
+      lastPhysicsAt = frameAt;
+      const flapped = apply(performance.now());
+      // Read Canvas only when sending a decision. At 100ms this avoids roughly
+      // five out of six full pixel scans, especially costly on Retina displays.
+      if (!flapped && performance.now() >= nextRequestAt && requests < prefs.maxRequests && inFlight.size < maxInFlight) {
+        const frame = ChofuJev.observe(ctx.getImageData(0,0,canvas.width,canvas.height),rect.width,rect.height);
+        if (!frame) throw Error('ゲーム画面を読み取れませんでした。');
+        last = { time: frameAt, frame };
+        request(frame, frameAt);
+      }
       update(); timer=requestAnimationFrame(tick);
     } catch (error) { stop(`読み取りエラー：${error.message}`); }
   }

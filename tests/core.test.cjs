@@ -50,9 +50,9 @@ test('physical extrapolation returns state at the target and carries timing and 
   assert.equal(state.screen.wallBottom, 360);
   assert.equal(state.game.score, 2);
   assert.equal(state.physics.obstacle_radius_factor, 0.9);
-  assert.equal(state.goal.target_score, 100);
-  assert.equal(state.observations.next_gap_half, 'lower_half');
-  assert.match(state.description, /inside the gap, lower half/);
+  assert.equal(state.goal, undefined);
+  assert.equal(state.observations.next_gap_half, 'straddling_middle');
+  assert.match(state.description, /straddling its middle/);
   assert.deepEqual(state.timing, {
     observation_time: 100, target_time: 200, predicted_latency: 150,
     request_interval_ms: 50, next_nominal_target_time: 250,
@@ -70,11 +70,11 @@ test('observation words distinguish the gap half from the screen half and ignore
     timing: { target_time: 200, predicted_latency: 150 },
     description: 'should flap', goal: { target_score: 10, advice: 'should flap' }
   });
-  assert.equal(state.observations.screen_half, 'upper_half');
-  assert.equal(state.observations.next_gap_half, 'lower_half');
-  assert.match(state.description, /screen and rising/);
-  assert.match(state.description, /inside the gap, lower half/);
-  assert.equal(state.goal.target_score, 100);
+  assert.equal(state.observations.screen_half, undefined);
+  assert.equal(state.observations.next_gap_half, 'straddling_middle');
+  assert.match(state.description, /bird is rising/);
+  assert.match(state.description, /straddling its middle/);
+  assert.equal(state.goal, undefined);
   assert.doesNotMatch(JSON.stringify(state), /should flap/);
   const outside = Jev.sanitizeReflexState({ ...state, player: { ...state.player, y: 60 } });
   assert.equal(outside.observations.next_gap_half, null);
@@ -97,16 +97,16 @@ test('target-time geometry promotes the following obstacle after the first has p
   assert.equal(empty.observations.relative_to_next_gap, 'no_obstacle');
 });
 
-test('Jev alone selects FLAP or WAIT with a goal and guided criteria', () => {
+test('Jev alone selects FLAP or WAIT with guided criteria and no score target', () => {
   const request = Jev.buildReflexRequest({ protocol: 'jev-reflex-guided-v1' }, 'jev-latest');
   const choice = request.questions.action;
   assert.equal(choice.type, 'choice');
   assert.deepEqual(Object.keys(choice.criteria), ['FLAP', 'WAIT']);
   assert.equal(typeof choice.criteria.FLAP, 'string');
   assert.equal(typeof choice.criteria.WAIT, 'string');
-  assert.match(choice.criteria.FLAP, /lower half/);
-  assert.match(choice.criteria.WAIT, /upper half/);
-  assert.match(choice.instructions.task, /score of 100/);
+  assert.match(choice.criteria.FLAP, /LOWER_HALF/);
+  assert.match(choice.criteria.WAIT, /UPPER_HALF/);
+  assert.doesNotMatch(choice.instructions.task, /100|target_score/);
 });
 
 test('decision parsing and response invalidation enforce the two-choice epoch contract', () => {
@@ -118,4 +118,42 @@ test('decision parsing and response invalidation enforce the two-choice epoch co
   assert.equal(Jev.reflexDiscardReason(request, 4, 1251, false), 'stale');
   assert.equal(Jev.reflexDiscardReason(request, 5, 1010, false), 'superseded');
   assert.equal(Jev.reflexDiscardReason(request, 4, 1010, true), 'game_over');
+});
+
+
+test('a measured slow connection immediately replaces historical fast priors', () => {
+  assert.equal(Jev.estimateLatency([400, 410, 420]).typical_ms, 410);
+  assert.equal(Jev.estimateLatency([400, 410, 420]).cautious_ms, 420);
+  assert.equal(Jev.estimateLatency([70, 80, 90]).cautious_ms, 100);
+});
+
+test('low-FPS prediction uses the actual frame cadence and capped game timestep', () => {
+  const observed = {
+    screen: { height: 360 }, player: { x: 90, y: 180, velocityY: 0, radius: 13 },
+    physics: { gravity: 1500, flapVelocity: -430, speedX: 165, frame_interval_ms: 100, max_frame_step_ms: 50 },
+    next_obstacle: { x: 200, width: 30, gapTop: 100, gapBottom: 260 }
+  };
+  const state = Jev.predictReflexState(observed, 400, 400, 400, 0, 100);
+  assert.equal(state.player.velocityY, 300);
+  assert.equal(state.player.y, 217.5);
+  assert.equal(state.next_obstacle.x, 167);
+  assert.equal(state.next_interval.y, 236.25);
+  assert.throws(() => Jev.predictReflexState({ ...observed, physics: { ...observed.physics, frame_interval_ms: 0 } }, 400, 400, 400));
+});
+
+test('gap description removes contradictory screen-half language and detects the bird straddling the middle', () => {
+  const observed = {
+    screen: { height: 360 }, player: { x: 90, y: 270, velocityY: 400, radius: 13 },
+    physics: { gravity: 1500, flapVelocity: -430, speedX: 165 },
+    timing: { target_time: 400, predicted_latency: 400, request_interval_ms: 100 },
+    next_obstacle: { x: 150, horizontal_distance: 60, width: 26, gapTop: 206, gapBottom: 334 }
+  };
+  const state = Jev.sanitizeReflexState(observed);
+  assert.equal(state.observations.next_gap_half, 'straddling_middle');
+  assert.equal(state.observations.screen_half, undefined);
+  assert.doesNotMatch(state.description, /half of the screen/);
+  assert.ok(state.next_interval.gap_bottom_clearance > 0);
+  const lower = Jev.sanitizeReflexState({ ...observed, player: { ...observed.player, y: 300 } });
+  assert.equal(lower.observations.next_gap_half, 'lower_half');
+  assert.ok(lower.next_interval.gap_bottom_clearance < 0);
 });

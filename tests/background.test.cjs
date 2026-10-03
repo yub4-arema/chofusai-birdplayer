@@ -105,7 +105,7 @@ test('reflex requests preserve target timing and send observed physics and guide
     assert.deepEqual(Object.keys(body.questions.action.criteria), ['FLAP', 'WAIT']);
     assert.equal(typeof body.questions.action.criteria.FLAP, 'string');
     assert.equal(typeof body.questions.action.criteria.WAIT, 'string');
-    assert.equal(body.state.goal.target_score, 100);
+    assert.equal(body.state.goal, undefined);
     return new Response(JSON.stringify(waitResult('jev-1.13.0')), { status: 200 });
   };
   const answer = await handle(request(run), game);
@@ -211,9 +211,9 @@ test('custom endpoints require permission and reject credential-bearing or remot
   await assert.rejects(handle({ type: 'config:save', config: { ...prefs, endpoint: 'https://example.com/v1/systemone' } }, popup), /許可/);
 });
 
-test('request interval defaults to 150ms, persists valid values and rejects invalid values', async () => {
+test('request interval defaults to 100ms, persists valid values and rejects invalid values', async () => {
   const { context, handle, stores } = harness();
-  assert.equal((await handle({ type: 'config:get' }, popup)).config.requestIntervalMs, 150);
+  assert.equal((await handle({ type: 'config:get' }, popup)).config.requestIntervalMs, 100);
   for (const requestIntervalMs of [50, 150, 500]) {
     const saved = await handle({ type: 'config:save', config: { ...prefs, requestIntervalMs }, apiKey: 'fake-test-key' }, popup);
     assert.equal(saved.config.requestIntervalMs, requestIntervalMs);

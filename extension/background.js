@@ -1,7 +1,7 @@
 "use strict";
 importScripts("core.js");
 const REFLEX_MODE = "jev-reflex-guided";
-const defaults = { mode: REFLEX_MODE, endpoint: "https://api.typesafe.ai/v1/systemone", model: "jev-latest", maxRequests: 1000, autoRestart: false, requestIntervalMs: 150 };
+const defaults = { mode: REFLEX_MODE, endpoint: "https://api.typesafe.ai/v1/systemone", model: "jev-latest", maxRequests: 1000, autoRestart: false, requestIntervalMs: 100 };
 const sessions = new Map();
 const ready = (async () => {
   await Promise.all([

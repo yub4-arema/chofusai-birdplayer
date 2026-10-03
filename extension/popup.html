@@ -3,15 +3,15 @@
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>調布祭 Flappy × Jev</title><link rel="stylesheet" href="popup.css"></head>
 <body>
   <main>
-    <p class="eyebrow">TYPE SAFE DECISIONS / FLAPPY</p>
+    <p class="eyebrow">TYPE SAFE DECISIONS / FLAPPY · v1.4.0-r2</p>
     <h1>調布祭 Flappy × Jev</h1>
     <p class="intro">Jevがリアルタイムに操作を判断します。接続先とモデルを選んでください。</p>
     <form id="settings">
       <label>プレイ方法</label>
       <small>Jevがクリックするか待つかを選び、得点を伸ばします。</small>
       <label for="requestInterval">Jevへの要求間隔（ms）</label>
-      <input id="requestInterval" type="number" min="50" max="500" step="1" value="150" required>
-      <small>推奨は150ms。長くすると呼び出し数が減り、操作の機会も少なくなります。次の開始から反映します。</small>
+      <input id="requestInterval" type="number" min="50" max="500" step="1" value="100" required>
+      <small>推奨は100ms。開始前に応答速度を確認します。長くすると呼び出し数が減り、操作の機会も少なくなります。次の開始から反映します。</small>
       <label for="endpoint">接続先URL</label>
       <input id="endpoint" type="url" value="https://api.typesafe.ai/v1/systemone" list="endpoints" spellcheck="false" required maxlength="2048">
       <datalist id="endpoints">
