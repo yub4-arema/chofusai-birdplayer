@@ -23,7 +23,7 @@ jobs:
           from pathlib import Path
           import hashlib, json, zipfile
           root = Path('.')
-          output = Path('chofusai-birdplayer-v1.4.0-r2-jev-guided.zip')
+          output = Path('chofusai-birdplayer-v1.4.0-r3-jev-guided.zip')
           files = sorted((root / 'extension').glob('*')) + [root / 'README.md', root / 'LICENSE', root / 'docs/realtime-benchmark.md']
           assert json.loads((root / 'extension/manifest.json').read_text())['version'] == '1.4.0'
           with zipfile.ZipFile(output, 'w', zipfile.ZIP_DEFLATED) as archive:
@@ -41,5 +41,5 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release upload v1.4.0 chofusai-birdplayer-v1.4.0-r2-jev-guided.zip chofusai-birdplayer-v1.4.0-r2-jev-guided.zip.sha256 --clobber --repo "$GITHUB_REPOSITORY"
+          gh release upload v1.4.0 chofusai-birdplayer-v1.4.0-r3-jev-guided.zip chofusai-birdplayer-v1.4.0-r3-jev-guided.zip.sha256 --clobber --repo "$GITHUB_REPOSITORY"
           gh release edit v1.4.0 --draft=false --latest --repo "$GITHUB_REPOSITORY"

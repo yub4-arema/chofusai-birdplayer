@@ -231,3 +231,31 @@ test('request interval defaults to 100ms, persists valid values and rejects inva
   };
   await handle(request(run), game);
 });
+
+test('API budget accepts arbitrary safe counts and zero for unlimited, preserving saved limits', async () => {
+  const { handle, stores } = harness();
+  assert.equal((await handle({ type: 'config:get' }, popup)).config.maxRequests, 0);
+  for (const maxRequests of [0, 1, 1001, 100000, Number.MAX_SAFE_INTEGER]) {
+    const saved = await handle({ type: 'config:save', config: { ...prefs, maxRequests } }, popup);
+    assert.equal(saved.config.maxRequests, maxRequests);
+    assert.equal(stores.local.maxRequests, maxRequests);
+  }
+  for (const maxRequests of [-1, 1.5, NaN, Infinity, '1001', Number.MAX_SAFE_INTEGER + 1]) {
+    await assert.rejects(handle({ type: 'config:save', config: { ...prefs, maxRequests } }, popup), /設定値/);
+  }
+  const migrated = harness({ local: { maxRequests: 1000 }, session: {} });
+  assert.equal((await migrated.handle({ type: 'config:get' }, popup)).config.maxRequests, 1000);
+});
+
+test('unlimited and explicit budgets above 1000 cross the old boundary, and finite budgets still stop', async () => {
+  for (const maxRequests of [0, 1001]) {
+    const { context, handle } = harness();
+    await handle({ type: 'config:save', config: { ...prefs, maxRequests }, apiKey: 'fake-test-key' }, popup);
+    const run = await handle({ type: 'run:begin' }, game);
+    context.fetch = async () => new Response(JSON.stringify(waitResult('qa')), { status: 200 });
+    for (let i = 0; i < 1001; i++) assert.equal((await handle(request(run, i), game)).ok, true);
+    if (maxRequests === 0) assert.equal((await handle(request(run, 1001), game)).ok, true);
+    else await assert.rejects(handle(request(run, 1001), game), /呼び出し上限/);
+    await handle({ type: 'run:stop', id: run.id }, game);
+  }
+});

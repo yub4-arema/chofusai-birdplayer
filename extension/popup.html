@@ -3,7 +3,7 @@
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>調布祭 Flappy × Jev</title><link rel="stylesheet" href="popup.css"></head>
 <body>
   <main>
-    <p class="eyebrow">TYPE SAFE DECISIONS / FLAPPY · v1.4.0-r2</p>
+    <p class="eyebrow">TYPE SAFE DECISIONS / FLAPPY · v1.4.0-r3</p>
     <h1>調布祭 Flappy × Jev</h1>
     <p class="intro">Jevがリアルタイムに操作を判断します。接続先とモデルを選んでください。</p>
     <form id="settings">
@@ -27,7 +27,8 @@
       <input id="model" value="jev-latest" list="models" spellcheck="false" required maxlength="200">
       <datalist id="models"><option value="jev-latest"></option><option value="jev-preview"></option><option value="kev-latest"></option><option value="english"></option><option value="multilingual"></option><option value="typed-decisions"></option></datalist>
       <label for="limit">1回の開始でのAPI呼び出し上限</label>
-      <input id="limit" type="number" min="1" max="1000" step="1" value="1000" required>
+      <input id="limit" type="number" min="0" step="1" value="0" required>
+      <small>0は無制限。1以上で任意の回数を指定できます。次の開始から反映します。</small>
       <label class="check"><input id="autoRestart" type="checkbox">ゲーム終了後、自動で再挑戦する</label>
       <button class="secondary" type="submit">設定を保存</button>
     </form>

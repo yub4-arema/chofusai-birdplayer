@@ -6,7 +6,7 @@ const { randomUUID } = require('node:crypto');
 require('../extension/core.js');
 const core = globalThis.ChofuJev;
 
-function harness(calibrationDelays = [400, 400, 400]) {
+function harness(calibrationDelays = [400, 400, 400], maxRequests = 1000) {
   let calibrationNumber = 0;
   let now = 0, timerId = 0, rafId = 0, messageListener, nextSession = 0;
   const timeouts = new Map(), rafs = new Map(), pending = new Map(), messages = [];
@@ -17,7 +17,7 @@ function harness(calibrationDelays = [400, 400, 400]) {
   const stage = { isConnected: true, clientHeight: 360, scrollIntoView() {}, focus() {}, getBoundingClientRect: () => ({ width: 672, height: 360, top: 100, bottom: 460 }), dispatchEvent() { counters.flaps.push(now); } };
   const canvas = { isConnected: true, width: 672, height: 360, getContext: () => ({ getImageData() { counters.scans++; return {}; } }) };
   const game = { before() {}, querySelector: selector => ({ '[data-stage]': stage, '[data-canvas]': canvas, '[data-score]': { textContent: '0' }, '[data-panel="over"]': { hidden: true }, '[data-action="restart"]': { click() { counters.resets++; } } })[selector] };
-  const prefs = { model: 'qa', endpoint: 'https://api.typesafe.ai/v1/systemone', maxRequests: 1000, requestIntervalMs: 100, autoRestart: false };
+  const prefs = { model: 'qa', endpoint: 'https://api.typesafe.ai/v1/systemone', maxRequests, requestIntervalMs: 100, autoRestart: false };
   function timeout(callback, ms) { const id = ++timerId; timeouts.set(id, { callback, at: now + ms }); return id; }
   const context = vm.createContext({
     console, innerHeight: 900, performance: { now: () => now }, crypto: { randomUUID },
@@ -100,4 +100,31 @@ test('one calibration spike cannot push the action target hundreds of millisecon
   await h.frame(1476); await h.frame(1560);
   const sent = h.messages.filter(m => m.type === 'decide:reflex').at(-1);
   assert.equal(sent.predicted_latency, 500);
+});
+
+
+test('unlimited content calibrates normally, sends past 1000 and can be stopped manually', async () => {
+  const h = harness([10, 10, 10], 0); await h.start();
+  assert.equal(h.messages.filter(m => m.type === 'decide:reflex').length, 3);
+  for (let i = 1; i <= 1002; i++) await h.frame(30 + i * 200);
+  assert.ok(h.messages.filter(m => m.type === 'decide:reflex').length > 1000);
+  assert.equal((await h.send('ui:status')).running, true);
+  assert.match(h.controls.stats.textContent, /無制限/);
+  await h.send('ui:stop');
+  const count = h.messages.length; await h.frame(h.now + 1000);
+  assert.equal(h.messages.length, count);
+  assert.equal((await h.send('ui:status')).running, false);
+});
+
+test('finite content budgets include calibration and still stop sending at the configured limit', async () => {
+  for (const limit of [1, 4, 1001]) {
+    const h = harness([10, 10, 10], limit); await h.start();
+    const startedAt = h.now;
+    for (let i = 1; i <= limit + 3; i++) await h.frame(startedAt + i * 200);
+    assert.equal(h.messages.filter(m => m.type === 'decide:reflex').length, limit);
+    const count = h.messages.filter(m => m.type === 'decide:reflex').length;
+    await h.frame(h.now + 1000);
+    assert.equal(h.messages.filter(m => m.type === 'decide:reflex').length, count);
+    await h.send('ui:stop');
+  }
 });

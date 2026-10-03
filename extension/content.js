@@ -18,7 +18,7 @@
       button:disabled{opacity:.5;cursor:default}button:focus-visible{outline:3px solid #fbc96b;outline-offset:3px}
       #stop{background:transparent;color:#edf6ff}#message{white-space:pre-wrap}
     </style>
-    <div class="box"><div class="row"><strong>調布祭 Flappy × Jev <span style="font-size:11px;color:#a9c6d9">r2</span></strong><div><button id="start">開始</button> <button id="stop" disabled>停止</button></div></div>
+    <div class="box"><div class="row"><strong>調布祭 Flappy × Jev <span style="font-size:11px;color:#a9c6d9">r3</span></strong><div><button id="start">開始</button> <button id="stop" disabled>停止</button></div></div>
     <p id="message" role="status" aria-live="polite">拡張機能からAPIキー・要求間隔を設定して、開始してください。</p>
     <small id="stats">クリックするか待つかはJevが選びます。</small></div>`;
   game.before(host);
@@ -31,11 +31,12 @@
   let last = null, lastFlap = 0, velocity = null, latencySamples = [], restartAt = null;
   let requests = 0, decisions = 0, lastLatency = null, best = 0, bestKey = '', runStartedAt = 0, lastPhysicsAt = null, frameIntervals = [];
   const runTime = time => Math.max(0, time - runStartedAt);
+  const hasRequestBudget = () => prefs.maxRequests === 0 || requests < prefs.maxRequests;
   const score = () => Number(game.querySelector('[data-score]')?.textContent || 0) || 0;
   const gameOver = () => Boolean(game.querySelector('[data-panel="over"]') && !game.querySelector('[data-panel="over"]').hidden);
   function update() {
     startButton.disabled = running; stopButton.disabled = !running;
-    stats.textContent = `スコア ${score()} ／ ベスト ${best} ／ API ${requests}/${prefs?.maxRequests ?? '—'}回${prefs ? ` ／ ${prefs.requestIntervalMs}ms間隔` : ''}${lastLatency === null ? '' : ` ／ 応答 ${lastLatency}ms`}`;
+    stats.textContent = `スコア ${score()} ／ ベスト ${best} ／ API ${requests}/${prefs ? (prefs.maxRequests === 0 ? '無制限' : prefs.maxRequests) : '—'}回${prefs ? ` ／ ${prefs.requestIntervalMs}ms間隔` : ''}${lastLatency === null ? '' : ` ／ 応答 ${lastLatency}ms`}`;
   }
   function stop(reason = '停止しました。') {
     running = false; generation++;
@@ -74,7 +75,7 @@
       stage.scrollIntoView({ block: 'center', behavior: 'instant' }); stage.focus({ preventScroll: true });
       // Measure the connection before the initial standard game input. These
       // replies calibrate timing only and are never replayed as game actions.
-      for (let index = 0; index < Math.min(3, prefs.maxRequests - 1); index++) {
+      for (let index = 0; index < (prefs.maxRequests === 0 ? 3 : Math.min(3, prefs.maxRequests - 1)); index++) {
         message.textContent = `応答速度を確認しています… ${index + 1}/3`;
         const sampledAt = performance.now(), rect = stage.getBoundingClientRect();
         const frame = ChofuJev.observe(ctx.getImageData(0, 0, canvas.width, canvas.height), rect.width, rect.height);
@@ -125,7 +126,7 @@
     const sentAt = performance.now(), interval = prefs.requestIntervalMs;
     if (sentAt < nextRequestAt) return;
     nextRequestAt += (Math.floor((sentAt - nextRequestAt) / interval) + 1) * interval;
-    if (requests >= prefs.maxRequests || inFlight.size >= maxInFlight) return;
+    if (!hasRequestBudget() || inFlight.size >= maxInFlight) return;
     const latency = ChofuJev.estimateLatency(latencySamples);
     // One startup spike must not push every target far beyond the typical
     // connection. Preserve at most one request interval of extra lead.
@@ -163,7 +164,7 @@
       if (gameOver()) {
         queue=[];
         if (!prefs.autoRestart) { stop(`ゲーム終了：${currentScore}点。開始で再挑戦できます。`); return; }
-        if (!inFlight.size && requests>=prefs.maxRequests) { stop('API呼び出し上限に達したため停止しました。'); return; }
+        if (!inFlight.size && !hasRequestBudget()) { stop('API呼び出し上限に達したため停止しました。'); return; }
         restartAt ??= performance.now()+650;
         message.textContent = `${currentScore}点で終了。再挑戦します…`;
         if (performance.now()>=restartAt && !inFlight.size) {
@@ -190,7 +191,7 @@
       const flapped = apply(performance.now());
       // Read Canvas only when sending a decision. At 100ms this avoids roughly
       // five out of six full pixel scans, especially costly on Retina displays.
-      if (!flapped && performance.now() >= nextRequestAt && requests < prefs.maxRequests && inFlight.size < maxInFlight) {
+      if (!flapped && performance.now() >= nextRequestAt && hasRequestBudget() && inFlight.size < maxInFlight) {
         const frame = ChofuJev.observe(ctx.getImageData(0,0,canvas.width,canvas.height),rect.width,rect.height);
         if (!frame) throw Error('ゲーム画面を読み取れませんでした。');
         last = { time: frameAt, frame };

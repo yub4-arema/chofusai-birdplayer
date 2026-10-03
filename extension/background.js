@@ -1,7 +1,7 @@
 "use strict";
 importScripts("core.js");
 const REFLEX_MODE = "jev-reflex-guided";
-const defaults = { mode: REFLEX_MODE, endpoint: "https://api.typesafe.ai/v1/systemone", model: "jev-latest", maxRequests: 1000, autoRestart: false, requestIntervalMs: 100 };
+const defaults = { mode: REFLEX_MODE, endpoint: "https://api.typesafe.ai/v1/systemone", model: "jev-latest", maxRequests: 0, autoRestart: false, requestIntervalMs: 100 };
 const sessions = new Map();
 const ready = (async () => {
   await Promise.all([
@@ -55,7 +55,7 @@ async function decideReflex(session, tabId, message) {
   const requestId = message.request_id;
   if (typeof requestId !== "string" || requestId.length < 1 || requestId.length > 100 ||
       session.seenRequestIds.has(requestId)) throw requestError("リクエストIDが不正です。");
-  if (session.count >= session.prefs.maxRequests) throw requestError("設定したAPI呼び出し上限に達しました。");
+  if (session.prefs.maxRequests > 0 && session.count >= session.prefs.maxRequests) throw requestError("設定したAPI呼び出し上限に達しました。");
   if (session.controllers.size >= ChofuJev.REFLEX_MAX_IN_FLIGHT) throw requestError("同時リクエスト上限に達しました。");
   let metadata;
   try {
@@ -150,7 +150,7 @@ async function handle(message, sender) {
   if (message?.type === "config:save" && isPopup(sender)) {
     const prefs = message.config;
     if (!prefs || typeof prefs.model !== "string" || !/^[a-zA-Z0-9][a-zA-Z0-9._:/@+-]{0,199}$/.test(prefs.model) ||
-        !Number.isInteger(prefs.maxRequests) || prefs.maxRequests < 1 || prefs.maxRequests > 1000) throw new Error("設定値を確認してください。");
+        !Number.isSafeInteger(prefs.maxRequests) || prefs.maxRequests < 0) throw new Error("設定値を確認してください。");
     const requestIntervalMs = prefs.requestIntervalMs ?? defaults.requestIntervalMs;
     if (!Number.isInteger(requestIntervalMs) || requestIntervalMs < 50 || requestIntervalMs > 500) throw new Error("要求間隔を確認してください。");
     const endpoint = ChofuJev.endpoint(prefs.endpoint ?? defaults.endpoint);
