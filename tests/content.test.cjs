@@ -6,17 +6,22 @@ const { randomUUID } = require('node:crypto');
 require('../extension/core.js');
 const core = globalThis.ChofuJev;
 
-function harness(calibrationDelays = [400, 400, 400], maxRequests = 1000) {
+function harness(calibrationDelays = [400, 400, 400], maxRequests = 1000, initiallyGameOver = false) {
   let calibrationNumber = 0;
   let now = 0, timerId = 0, rafId = 0, messageListener, nextSession = 0;
+  let copiedText = '';
   const timeouts = new Map(), rafs = new Map(), pending = new Map(), messages = [];
   const counters = { resets: 0, flaps: [], scans: 0 };
-  const el = () => ({ textContent: '', disabled: false, addEventListener() {} });
-  const controls = Object.fromEntries(['message', 'stats', 'start', 'stop'].map(id => [id, el()]));
+  let gameOverState = initiallyGameOver, scoreValue = initiallyGameOver ? 16 : 0;
+  const el = (id = '') => {
+    const listeners = {};
+    return { id, textContent: '', disabled: false, hidden: id === 'diagnosticsPanel', dataset: {}, value: '', children: [], addEventListener(type, listener) { listeners[type] = listener; }, click() { return listeners.click?.(); }, replaceChildren(...children) { this.children = children; } };
+  };
+  const controls = Object.fromEntries(['message', 'stats', 'start', 'stop', 'diagnosticsCopy'].map(id => [id, el(id)]));
   const shadow = { innerHTML: '', getElementById: id => controls[id] };
   const stage = { isConnected: true, clientHeight: 360, scrollIntoView() {}, focus() {}, getBoundingClientRect: () => ({ width: 672, height: 360, top: 100, bottom: 460 }), dispatchEvent() { counters.flaps.push(now); } };
   const canvas = { isConnected: true, width: 672, height: 360, getContext: () => ({ getImageData() { counters.scans++; return {}; } }) };
-  const game = { before() {}, querySelector: selector => ({ '[data-stage]': stage, '[data-canvas]': canvas, '[data-score]': { textContent: '0' }, '[data-panel="over"]': { hidden: true }, '[data-action="restart"]': { click() { counters.resets++; } } })[selector] };
+  const game = { before() {}, querySelector: selector => ({ '[data-stage]': stage, '[data-canvas]': canvas, '[data-score]': { get textContent() { return String(scoreValue); } }, '[data-panel="over"]': { get hidden() { return !gameOverState; } }, '[data-action="restart"]': { click() { counters.resets++; gameOverState = false; scoreValue = 0; } } })[selector] };
   const prefs = { model: 'qa', endpoint: 'https://api.typesafe.ai/v1/systemone', maxRequests, requestIntervalMs: 100, autoRestart: false };
   function timeout(callback, ms) { const id = ++timerId; timeouts.set(id, { callback, at: now + ms }); return id; }
   const context = vm.createContext({
@@ -24,7 +29,8 @@ function harness(calibrationDelays = [400, 400, 400], maxRequests = 1000) {
     PointerEvent: class {}, setTimeout: timeout, clearTimeout: id => timeouts.delete(id),
     requestAnimationFrame: callback => { const id = ++rafId; rafs.set(id, callback); return id; }, cancelAnimationFrame: id => rafs.delete(id),
     localStorage: { getItem() { return null; }, setItem() {} }, window: { addEventListener() {} },
-    document: { hidden: false, querySelector: () => game, getElementById: () => null, createElement: () => ({ attachShadow: () => shadow }), addEventListener() {} },
+    navigator: { clipboard: { async writeText(value) { copiedText = value; } } },
+    document: { hidden: false, body: { append() {} }, querySelector: () => game, getElementById: () => null, createElement: tag => tag === 'div' ? ({ attachShadow: () => shadow }) : ({ tag, textContent: '', click() {}, remove() {} }), addEventListener() {} },
     ChofuJev: { ...core, observe: () => ({ width: 672, height: 360, scale: 1, player: { x: 163, y: 180, radius: 13 }, obstacles: [] }) },
     chrome: { runtime: { onMessage: { addListener(listener) { messageListener = listener; } }, sendMessage(message) {
       messages.push(message);
@@ -54,16 +60,17 @@ function harness(calibrationDelays = [400, 400, 400], maxRequests = 1000) {
   async function frame(at) { await advance(at); const callbacks = [...rafs.values()]; rafs.clear(); callbacks.forEach(callback => callback(at)); await flush(); }
   const send = type => new Promise(resolve => { messageListener({ type }, {}, resolve); });
   async function start() { const promise = send('ui:start'); await flush(); await advance(now + calibrationDelays.reduce((a,b) => a+b, 0)); assert.equal((await promise).ok, true); }
-  return { start, send, advance, frame, flush, counters, messages, controls, get now() { return now; } };
+  return { start, send, advance, frame, flush, counters, messages, controls, shadow, get copiedText() { return copiedText; }, get now() { return now; } };
 }
 
-test('startup measures three real round trips before the standard reset and ignores calibration choices', async () => {
+test('startup measures three real round trips before its initial input and ignores calibration choices', async () => {
   const h = harness(), start = h.send('ui:start');
   await h.flush(); await h.advance(1199);
   assert.equal(h.counters.resets, 0);
   assert.equal(h.counters.flaps.length, 0);
   await h.advance(1200); assert.equal((await start).ok, true);
-  assert.equal(h.counters.resets, 1);
+  assert.equal(h.counters.resets, 0);
+  assert.deepEqual(h.counters.flaps, [1200]);
   assert.equal(h.messages.filter(m => m.type === 'decide:reflex').length, 3);
   await h.frame(1216); await h.frame(1300);
   const sent = h.messages.filter(m => m.type === 'decide:reflex').at(-1);
@@ -72,15 +79,62 @@ test('startup measures three real round trips before the standard reset and igno
 
 test('an early Jev FLAP executes at its target between render frames, with no extra local clicks', async () => {
   const h = harness(); await h.start(); await h.frame(1216); await h.frame(1300); await h.advance(1310);
-  assert.equal(h.counters.flaps.length, 0);
-  await h.advance(1699); assert.equal(h.counters.flaps.length, 0);
-  await h.advance(1700); assert.deepEqual(h.counters.flaps, [1700]);
-  await h.advance(1800); assert.deepEqual(h.counters.flaps, [1700]);
+  assert.deepEqual(h.counters.flaps, [1200]);
+  await h.advance(1699); assert.deepEqual(h.counters.flaps, [1200]);
+  await h.advance(1700); assert.deepEqual(h.counters.flaps, [1200, 1700]);
+  await h.advance(1800); assert.deepEqual(h.counters.flaps, [1200, 1700]);
+});
+
+test('starting from game over resets before calibration so the bird is observable', async () => {
+  const h = harness([10, 10, 10], 1000, true); await h.start();
+  assert.equal(h.counters.resets, 1);
+  assert.deepEqual(h.counters.flaps, [30]);
+  const events = (await h.send('ui:diagnostics')).runs.at(-1).events;
+  assert.ok(events.findIndex(event => event.type === 'game_reset_before_calibration') < events.findIndex(event => event.type === 'calibration_sent'));
+  assert.equal(events.some(event => event.type === 'run_stopped' && /読み取れません/.test(event.reason)), false);
+});
+
+test('diagnostic events distinguish received, accepted, executed, and superseded decisions', async () => {
+  const h = harness(); await h.start();
+  await h.frame(1216); await h.frame(1300); await h.advance(1310);
+  await h.frame(1400); await h.advance(1410);
+  await h.advance(1700);
+  const result = await h.send('ui:diagnostics');
+  assert.equal(result.ok, true);
+  const events = result.runs.at(-1).events;
+  assert.equal(events.filter(event => event.type === 'calibration_response').length, 3);
+  assert.equal(events.filter(event => event.type === 'response_received').length, 2);
+  assert.equal(events.filter(event => event.type === 'response_accepted').length, 2);
+  assert.equal(events.filter(event => event.type === 'decision_applied').length, 1);
+  assert.equal(events.filter(event => event.type === 'flap_executed').length, 1);
+  assert.equal(events.filter(event => event.type === 'response_discarded' && event.reason === 'superseded').length, 1);
+  await h.send('ui:stop');
+  assert.doesNotMatch(h.controls.message.textContent, /response_discarded|request_sent/);
+  assert.doesNotMatch(h.shadow.innerHTML, /diagnosticsPanel|diagnosticsSummary|diagnosticsEvents|<pre/i);
+  await h.controls.diagnosticsCopy.click();
+  const copied = JSON.parse(h.copiedText);
+  assert.equal(copied.format, 'jev-reflex-diagnostics-v1');
+  assert.equal(copied.id, result.runs.at(-1).id);
+  assert.match(h.copiedText, /response_discarded/);
+  assert.match(h.controls.message.textContent, /最新の終了済み診断ログをコピーしました/);
+  assert.doesNotMatch(h.copiedText, /apiKey|"state"/i);
+});
+
+test('diagnostics copy ignores an ongoing run and selects the most recently ended run', async () => {
+  const h = harness(); await h.start(); await h.send('ui:stop');
+  const firstRun = (await h.send('ui:diagnostics')).runs[0];
+  const started = h.send('ui:start'); await h.flush(); await h.advance(h.now + 1200); assert.equal((await started).ok, true);
+  await h.controls.diagnosticsCopy.click();
+  assert.equal(JSON.parse(h.copiedText).id, firstRun.id);
+  await h.send('ui:stop');
+  await h.controls.diagnosticsCopy.click();
+  assert.notEqual(JSON.parse(h.copiedText).id, firstRun.id);
+  assert.doesNotMatch(h.controls.message.textContent, /"events"|request_sent/);
 });
 
 test('stop cancels both a queued future FLAP and a startup calibration without stopping a new run', async () => {
   const h = harness(); await h.start(); await h.frame(1216); await h.frame(1300); await h.advance(1310);
-  await h.send('ui:stop'); await h.advance(1800); assert.equal(h.counters.flaps.length, 0);
+  await h.send('ui:stop'); await h.advance(1800); assert.deepEqual(h.counters.flaps, [1200]);
   const cancelled = h.send('ui:start'); await h.flush(); await h.advance(1900); await h.send('ui:stop');
   const restarted = h.send('ui:start'); await h.flush(); await h.advance(3100);
   assert.equal((await cancelled).ok, false); assert.equal((await restarted).ok, true);
