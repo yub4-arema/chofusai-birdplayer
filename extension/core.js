@@ -148,7 +148,9 @@
     return {
       protocol: "jev-reflex-neutral-v1",
       screen: { height },
-      player: { y: playerY, velocityY, radius },
+
+      player: { x: playerX, y: playerY, velocityY, radius },
+
       next_obstacle: next,
       following_obstacle: following,
       physics: { gravity, flapVelocity, speedX },
