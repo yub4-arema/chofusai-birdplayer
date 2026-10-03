@@ -1,7 +1,7 @@
 "use strict";
 importScripts("core.js");
-const REFLEX_MODE = "jev-reflex-neutral";
-const defaults = { mode: REFLEX_MODE, endpoint: "https://api.typesafe.ai/v1/systemone", model: "jev-latest", maxRequests: 200, autoRestart: false };
+const REFLEX_MODE = "jev-reflex-guided";
+const defaults = { mode: REFLEX_MODE, endpoint: "https://api.typesafe.ai/v1/systemone", model: "jev-latest", maxRequests: 1000, autoRestart: false, requestIntervalMs: 150 };
 const sessions = new Map();
 const ready = (async () => {
   await Promise.all([
@@ -41,7 +41,8 @@ function end(tabId) {
 async function config() {
   await ready;
   const [prefs, stored] = await Promise.all([chrome.storage.local.get(defaults), keys()]);
-  // v1.4.0 has one standard control protocol. Migrate any v1.3 mode selection.
+  // The current source uses guided reflex play. Keep connection settings when
+  // migrating neutral or earlier control modes.
   if (prefs.mode !== REFLEX_MODE) await chrome.storage.local.set({ mode: REFLEX_MODE });
   return { ...prefs, mode: REFLEX_MODE, hasKey: Boolean(stored[prefs.endpoint]) };
 }
@@ -50,7 +51,7 @@ function requestError(message, failureClass = "harness") {
   error.failureClass = failureClass;
   return error;
 }
-async function decideReflex(session, tabId, message, receivedAt) {
+async function decideReflex(session, tabId, message) {
   const requestId = message.request_id;
   if (typeof requestId !== "string" || requestId.length < 1 || requestId.length > 100 ||
       session.seenRequestIds.has(requestId)) throw requestError("リクエストIDが不正です。");
@@ -72,9 +73,13 @@ async function decideReflex(session, tabId, message, receivedAt) {
         Math.abs(metadata.target_time - metadata.sent_at - metadata.predicted_latency) > 2) {
       throw new Error("リクエスト時刻が不正です。");
     }
-    const state = ChofuJev.sanitizeReflexState(message.state);
+    const state = ChofuJev.sanitizeReflexState({ ...message.state,
+      timing: { ...message.state?.timing, request_interval_ms: session.prefs.requestIntervalMs }
+    });
     if (Math.abs(state.timing.target_time - metadata.target_time) > 1 ||
-        Math.abs(state.timing.predicted_latency - metadata.predicted_latency) > 1) {
+        Math.abs(state.timing.observation_time - metadata.observation_time) > 1 ||
+        Math.abs(state.timing.predicted_latency - metadata.predicted_latency) > 1 ||
+        state.timing.flap_epoch !== metadata.flap_epoch) {
       throw new Error("状態とリクエストの時刻が一致しません。");
     }
     message = { ...message, state };
@@ -87,16 +92,8 @@ async function decideReflex(session, tabId, message, receivedAt) {
   session.count++;
   let timer;
   let timedOut = false;
-  const progress = (phase, detail = {}) => {
-    chrome.tabs.sendMessage(tabId, {
-      type: "decide:progress", id: session.id, request_id: requestId,
-      phase, elapsed_ms: Math.round(performance.now() - receivedAt),
-      requests: session.count, in_flight: session.controllers.size, ...detail
-    }, { frameId: 0 }).catch(() => {});
-  };
   let phase = "validation";
   try {
-    progress("worker_ready");
     phase = "credentials";
     const apiKey = (await keys())[session.prefs.endpoint];
     if (new URL(session.prefs.endpoint).origin === "https://api.typesafe.ai" && !apiKey) {
@@ -107,28 +104,23 @@ async function decideReflex(session, tabId, message, receivedAt) {
     }
     if (sessions.get(tabId) !== session) throw requestError("セッションが終了しました。", "cancelled");
     const body = JSON.stringify(ChofuJev.buildReflexRequest(message.state, session.prefs.model));
-    progress("request_prepared", { body_bytes: new TextEncoder().encode(body).byteLength });
     phase = "network";
     timer = setTimeout(() => { timedOut = true; controller.abort(); }, 2500);
-    progress("fetch_started");
     const started = performance.now();
     const response = await fetch(session.prefs.endpoint, {
       method: "POST",
       headers: { ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}), "Content-Type": "application/json", Accept: "application/json" },
       body, signal: controller.signal, credentials: "omit", redirect: "error"
     });
-    progress("headers_received", { http_status: response.status });
     if (!response.ok) {
       const reasons = { 401: "APIキーが無効です", 403: "APIへのアクセス権がありません", 429: "APIの利用制限に達しました" };
       throw requestError(`Jev API: ${reasons[response.status] ?? "接続エラー"} (HTTP ${response.status})`, "api_error");
     }
     phase = "response";
     const result = await response.json();
-    progress("body_received");
     phase = "jev_decision";
     const decision = ChofuJev.parseReflexDecision(result);
     if (sessions.get(tabId) !== session) throw requestError("セッションが終了しました。", "cancelled");
-    progress("decision_parsed");
     return {
       ok: true, ...decision, request_id: requestId,
       latencyMs: Math.round(performance.now() - started), requests: session.count
@@ -146,7 +138,6 @@ async function decideReflex(session, tabId, message, receivedAt) {
   }
 }
 async function handle(message, sender) {
-  const receivedAt = performance.now();
   await ready;
   if (message?.type === "config:get" && isPopup(sender)) return { ok: true, config: await config() };
   if (message?.type === "key:clear" && isPopup(sender)) {
@@ -160,6 +151,8 @@ async function handle(message, sender) {
     const prefs = message.config;
     if (!prefs || typeof prefs.model !== "string" || !/^[a-zA-Z0-9][a-zA-Z0-9._:/@+-]{0,199}$/.test(prefs.model) ||
         !Number.isInteger(prefs.maxRequests) || prefs.maxRequests < 1 || prefs.maxRequests > 1000) throw new Error("設定値を確認してください。");
+    const requestIntervalMs = prefs.requestIntervalMs ?? defaults.requestIntervalMs;
+    if (!Number.isInteger(requestIntervalMs) || requestIntervalMs < 50 || requestIntervalMs > 500) throw new Error("要求間隔を確認してください。");
     const endpoint = ChofuJev.endpoint(prefs.endpoint ?? defaults.endpoint);
     if (endpoint !== defaults.endpoint && !await chrome.permissions.contains({ origins: [ChofuJev.originPattern(endpoint)] })) throw new Error("接続先へのアクセスを許可してください。");
     if (message.apiKey !== undefined && (typeof message.apiKey !== "string" || message.apiKey.length > 512)) throw new Error("APIキーを確認してください。");
@@ -170,7 +163,7 @@ async function handle(message, sender) {
       if (message.apiKey.trim()) stored[endpoint] = message.apiKey.trim(); else delete stored[endpoint];
       await chrome.storage.local.set({ apiKeys: stored });
     }
-    await chrome.storage.local.set({ mode: REFLEX_MODE, endpoint, model: prefs.model, maxRequests: prefs.maxRequests, autoRestart: Boolean(prefs.autoRestart) });
+    await chrome.storage.local.set({ mode: REFLEX_MODE, endpoint, model: prefs.model, maxRequests: prefs.maxRequests, autoRestart: Boolean(prefs.autoRestart), requestIntervalMs });
     return { ok: true, config: await config() };
   }
   if (message?.type?.startsWith("config:")) throw new Error("設定の操作は拡張機能のポップアップ専用です。");
@@ -193,71 +186,19 @@ async function handle(message, sender) {
     }
   }
   if (message.type === "run:stop") {
-    // Cleanup from an old diagnostic request must not abort a newly started run.
+    // A stop message from an old run must not abort a newly started run.
     if (!message.id || sessions.get(tabId)?.id === message.id) end(tabId);
     return { ok: true };
   }
   const session = sessions.get(tabId);
   if (!session || message.id !== session.id) throw new Error("セッションが終了しました。もう一度開始してください。");
   if (message.type === "decide:reflex") {
-    if (session.prefs.mode !== REFLEX_MODE) throw new Error("v1.4.0の標準要求形式に一致しません。");
-    return await decideReflex(session, tabId, message, receivedAt);
+    if (session.prefs.mode !== REFLEX_MODE) throw new Error("標準要求形式に一致しません。");
+    return await decideReflex(session, tabId, message);
   }
-  if (message.type !== "decide" || !["jev-plan", "jev"].includes(session.prefs.mode)) throw new Error("操作が不正です。");
-  if (session.controller) throw new Error("Jevに問い合わせ中です。");
-  if (session.count >= session.prefs.maxRequests) throw new Error("設定したAPI呼び出し上限に達しました。");
-  const planned = session.prefs.mode === "jev-plan";
-  const state = planned ? ChofuJev.sanitizePlanState(message.state) : ChofuJev.sanitizeState(message.state);
-  const controller = new AbortController();
-  session.controller = controller;
-  let timer;
-  let timedOut = false;
-  const started = performance.now();
-  const progress = (phase, detail = {}) => {
-    if (!Number.isInteger(message.attempt)) return;
-    chrome.tabs.sendMessage(tabId, {
-      type: "decide:progress", id: session.id, attempt: message.attempt,
-      phase, elapsed_ms: Math.round(performance.now() - receivedAt), requests: session.count, ...detail
-    }, { frameId: 0 }).catch(() => {});
-  };
-  progress("worker_ready");
-  try {
-    const apiKey = (await keys())[session.prefs.endpoint];
-    if (new URL(session.prefs.endpoint).origin === "https://api.typesafe.ai" && !apiKey) throw new Error("APIキーがありません。拡張機能から再設定してください。");
-    if (session.prefs.endpoint !== defaults.endpoint && !await chrome.permissions.contains({ origins: [ChofuJev.originPattern(session.prefs.endpoint)] })) throw new Error("接続先へのアクセス権がありません。");
-    if (sessions.get(tabId) !== session) throw new Error("セッションが終了しました。");
-    session.count++;
-    const body = JSON.stringify(planned ? ChofuJev.buildPlanRequest(state, session.prefs.model) : ChofuJev.buildRequest(state, session.prefs.model));
-    progress("request_prepared", { body_bytes: new TextEncoder().encode(body).byteLength });
-    timer = setTimeout(() => { timedOut = true; controller.abort(); }, 2500);
-    progress("fetch_started");
-    const response = await fetch(session.prefs.endpoint, {
-      method: "POST",
-      headers: { ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}), "Content-Type": "application/json", Accept: "application/json" },
-      body, signal: controller.signal,
-      credentials: "omit", redirect: "error"
-    });
-    progress("headers_received", { http_status: response.status });
-    if (!response.ok) {
-      const reasons = { 401: "APIキーが無効です", 403: "APIへのアクセス権がありません", 429: "APIの利用制限に達しました" };
-      throw new Error(`Jev API: ${reasons[response.status] ?? "接続エラー"} (HTTP ${response.status})`);
-    }
-    const result = await response.json();
-    progress("body_received");
-    const decision = planned ? ChofuJev.parsePlanDecision(result) : ChofuJev.parseDecision(result);
-    if (sessions.get(tabId) !== session) throw new Error("セッションが終了しました。");
-    progress("decision_parsed");
-    return { ok: true, ...decision, latencyMs: Math.round(performance.now() - started), requests: session.count };
-  } catch (error) {
-    progress(error.name === "AbortError" ? (timedOut ? "timeout" : "cancelled") : "request_failed");
-    if (error.name === "AbortError") throw new Error("Jevの応答待ちが終了しました（停止またはタイムアウト）。");
-    if (error instanceof TypeError) throw new Error("Jev APIに接続できません。ネットワークを確認してください。");
-    throw error;
-  } finally {
-    clearTimeout(timer);
-    session.controller = null;
-  }
+  throw new Error("操作が不正です。");
 }
+
 chrome.runtime.onMessage.addListener((message, sender, respond) => {
   handle(message, sender).then(respond).catch(error => respond({ ok: false, error: error.message, failure_class: error.failureClass ?? "harness" }));
   return true;

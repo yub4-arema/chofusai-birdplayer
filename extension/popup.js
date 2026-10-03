@@ -13,6 +13,7 @@ function displayConfig(config) {
   $("model").value = config.model;
   $("endpoint").value = config.endpoint;
   $("limit").value = config.maxRequests; $("autoRestart").checked = config.autoRestart;
+  $("requestInterval").value = config.requestIntervalMs;
   $("keyStatus").textContent = hasKey ? "この接続先のキーは保存済みです。空欄ならそのキーを使います。" : "この接続先のキーは未設定です。不要な場合は空欄のままで使えます。";
 }
 async function save() {
@@ -23,7 +24,7 @@ async function save() {
   }
   const message = {
     type: "config:save",
-    config: { endpoint, model: $("model").value.trim(), maxRequests: Number($("limit").value), autoRestart: $("autoRestart").checked }
+    config: { endpoint, model: $("model").value.trim(), maxRequests: Number($("limit").value), autoRestart: $("autoRestart").checked, requestIntervalMs: Number($("requestInterval").value) }
   };
   if ($("apiKey").value.trim()) message.apiKey = $("apiKey").value.trim();
   const result = await background(message);
@@ -48,7 +49,7 @@ $("settings").addEventListener("submit", event => {
 });
 $("start").addEventListener("click", () => void action(async () => {
   await save(); setStatus("開始しています…"); await game("ui:stop"); await game("ui:start");
-  setStatus("開始しました。Jevが約50msごとにFLAP／WAITを判断します。");
+  setStatus(`開始しました。要求間隔${$("requestInterval").value}msです。`);
 }));
 $("stop").addEventListener("click", () => void action(async () => { await game("ui:stop"); setStatus("停止しました。"); }));
 $("clearKey").addEventListener("click", () => void action(async () => {

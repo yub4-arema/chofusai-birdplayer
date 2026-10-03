@@ -8,7 +8,10 @@
     <p class="intro">Jevがリアルタイムに操作を判断します。接続先とモデルを選んでください。</p>
     <form id="settings">
       <label>プレイ方法</label>
-      <small>約50msごとにFLAP／WAITをJevへ問い合わせ、応答を待たず最大12件を並列処理します。Jevの選択は補正せず実行します。</small>
+      <small>Jevがクリックするか待つかを選び、得点を伸ばします。</small>
+      <label for="requestInterval">Jevへの要求間隔（ms）</label>
+      <input id="requestInterval" type="number" min="50" max="500" step="1" value="150" required>
+      <small>推奨は150ms。長くすると呼び出し数が減り、操作の機会も少なくなります。次の開始から反映します。</small>
       <label for="endpoint">接続先URL</label>
       <input id="endpoint" type="url" value="https://api.typesafe.ai/v1/systemone" list="endpoints" spellcheck="false" required maxlength="2048">
       <datalist id="endpoints">
@@ -24,7 +27,7 @@
       <input id="model" value="jev-latest" list="models" spellcheck="false" required maxlength="200">
       <datalist id="models"><option value="jev-latest"></option><option value="jev-preview"></option><option value="kev-latest"></option><option value="english"></option><option value="multilingual"></option><option value="typed-decisions"></option></datalist>
       <label for="limit">1回の開始でのAPI呼び出し上限</label>
-      <input id="limit" type="number" min="1" max="1000" step="1" value="200" required>
+      <input id="limit" type="number" min="1" max="1000" step="1" value="1000" required>
       <label class="check"><input id="autoRestart" type="checkbox">ゲーム終了後、自動で再挑戦する</label>
       <button class="secondary" type="submit">設定を保存</button>
     </form>

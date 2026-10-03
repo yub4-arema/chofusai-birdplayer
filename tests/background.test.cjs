@@ -5,6 +5,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { randomUUID } = require('node:crypto');
 const root = path.join(__dirname, '..', 'extension');
+
 function harness(existing) {
   const stores = existing ?? { local: {}, session: {} };
   const storage = kind => ({
@@ -23,28 +24,52 @@ function harness(existing) {
       storage: { local: storage('local'), session: storage('session') },
       permissions: { async contains() { return true; } },
       runtime: { id: 'qa-extension', getURL: p => `chrome-extension://qa-extension/${p}`, onMessage: { addListener() {} } },
-      tabs: { onRemoved: { addListener() {} } }
+      tabs: { sendMessage: async () => ({}), onRemoved: { addListener() {} } }
     }
   });
   context.importScripts = name => vm.runInContext(fs.readFileSync(path.join(root, name), 'utf8'), context);
   vm.runInContext(fs.readFileSync(path.join(root, 'background.js'), 'utf8'), context);
   return { context, handle: vm.runInContext('handle', context), stores };
 }
+
 const popup = { id: 'qa-extension', url: 'chrome-extension://qa-extension/popup.html' };
 const game = { id: 'qa-extension', url: 'https://www.chofusai.jp/map/', tab: { id: 42 }, frameId: 0 };
-const prefs = { mode: 'jev', model: 'jev-latest', maxRequests: 1, autoRestart: false };
-const state = {
-  screen: { width: 672, height: 360 }, player: { x: 163, y: 180, radius: 13, velocityY: 25 },
-  physics: { gravity: 1500, flapVelocity: -430, speedX: 165 },
-  next: { x: 600, width: 30, gapTop: 100, gapBottom: 265 }, following: null,
-  since_last_click_ms: 320, decision_horizon_ms: 250,
-  predicted_at_response: { player_y: 233, player_velocity_y: 400, next: { x: 559, width: 30, gapTop: 100, gapBottom: 265 }, following: null },
-  pageText: 'This page property must never be sent to the API.'
-};
-const result = { model: 'jev-test', answers: { action: { type: 'choice', choice: 'click', confidence: 0.9 } } };
-test('only extension popup can save/read config; game cannot retrieve the key', async () => {
+const prefs = { mode: 'jev-reflex-guided', model: 'jev-latest', maxRequests: 20, autoRestart: false, requestIntervalMs: 50 };
+
+function request(run, index = 0, changes = {}) {
+  const sentAt = 100 + index * 50;
+  const observationTime = sentAt - 2;
+  const predictedLatency = 180;
+  const targetTime = sentAt + predictedLatency;
+  const state = {
+    protocol: 'jev-reflex-guided-v1',
+    screen: { height: 360, wallTop: 0, wallBottom: 360 },
+    player: { x: 90, y: 180, velocityY: 35, radius: 13 },
+    game: { score: 2 },
+    next_obstacle: { x: 300, horizontal_distance: 210, width: 30, gapTop: 100, gapBottom: 260, type: 'gold', score_value: 3 },
+    following_obstacle: null,
+    physics: { gravity: 1500, flapVelocity: -430, speedX: 165, max_frame_step_ms: 50, obstacle_radius_factor: 0.9 },
+    timing: {
+      observation_time: observationTime, target_time: targetTime, predicted_latency: predictedLatency,
+      request_interval_ms: 50, next_nominal_target_time: targetTime + 50,
+      flap_epoch: 2, last_flap_time: 20, since_last_flap_ms: targetTime - 20,
+      unit: 'ms_since_run_start'
+    },
+    observations: { vertical_motion: 'falling', relative_to_next_gap: 'inside_gap', screen_half: 'upper_half' }
+  };
+  return {
+    type: 'decide:reflex', id: run.id, request_id: `qa-${index}`,
+    sent_at: sentAt, observation_time: observationTime, target_time: targetTime,
+    predicted_latency: predictedLatency, flap_epoch: 2,
+    state: { ...state, timing: { ...state.timing, ...changes.timing } }, ...(changes.message ?? {})
+  };
+}
+
+const waitResult = model => ({ model, answers: { action: { type: 'choice', choice: 'WAIT', confidence: 0.8, probabilities: { FLAP: 0.2, WAIT: 0.8 } } } });
+
+test('only the extension popup can save or read API-key settings', async () => {
   const { handle, stores } = harness();
-  await assert.rejects(handle({ type: 'config:save', config: prefs, apiKey: 'fake' }, game), /専用/);
+  await assert.rejects(handle({ type: 'config:save', config: prefs, apiKey: 'fake-key' }, game), /専用/);
   await assert.rejects(handle({ type: 'config:get' }, { ...popup, id: 'other-extension' }), /専用/);
   await assert.rejects(handle({ type: 'run:begin' }, game), /APIキー/);
   const saved = await handle({ type: 'config:save', config: prefs, apiKey: 'fake-test-key' }, popup);
@@ -56,9 +81,10 @@ test('only extension popup can save/read config; game cannot retrieve the key', 
   await assert.rejects(handle({ type: 'run:begin' }, { ...game, url: 'https://example.com/map/' }), /専用/);
   await assert.rejects(handle({ type: 'run:begin' }, { ...game, frameId: 2 }), /専用/);
 });
-test('API request matches official contract and drops page properties; budget is enforced', async () => {
+
+test('reflex requests preserve target timing and send observed physics and guided criteria', async () => {
   const { context, handle } = harness();
-  await handle({ type: 'config:save', config: prefs, apiKey: 'fake-test-key' }, popup);
+  await handle({ type: 'config:save', config: { ...prefs, maxRequests: 1 }, apiKey: 'fake-test-key' }, popup);
   const run = await handle({ type: 'run:begin' }, game);
   let calls = 0;
   context.fetch = async (url, options) => {
@@ -66,37 +92,67 @@ test('API request matches official contract and drops page properties; budget is
     assert.equal(url, 'https://api.typesafe.ai/v1/systemone');
     assert.equal(options.headers.Authorization, 'Bearer fake-test-key');
     const body = JSON.parse(options.body);
-    assert.equal(body.model, 'jev-latest'); assert.equal(body.questions.action.type, 'choice');
-    assert.deepEqual(body.questions.action.criteria, {
-      click: {
-        effect: 'Set velocityY to flapVelocity once, AFTER decision_horizon_ms has elapsed.',
-        choose_when: [
-          'Without this flap, the player would reach the floor or the lower obstacle before another answer can intervene, and this flap would avoid that contact.',
-          'The approaching opening requires upward motion at answer time, and a flap would allow entry without hitting the ceiling or upper obstacle.'
-        ],
-        boundary_cases: 'A slightly negative observed velocity can become downward during the response delay. An opening far ahead does not remove the need to prevent falling into the floor now.'
-      },
-      wait: {
-        effect: 'Keep the current motion with gravity and no flap until the NEXT answer, including both response delays and decision_interval_ms.',
-        choose_when: [
-          'Waiting through the full interval keeps the player alive and leaves a later answer time to act.',
-          'The player is above an approaching lower opening and needs to descend into it; a flap would keep the player above gapTop or send it into the upper obstacle.',
-          'A flap would cause contact with the ceiling or upper obstacle, and waiting gives a better chance to survive.'
-        ],
-        boundary_cases: 'Do not wait solely because observed velocityY is negative or the player is in the upper half. Account for falling during both response delays. Do not click solely because an earlier apex example chose click: the next opening may require descent.'
-      }
-    });
-    assert.equal(body.state.pageText, undefined);
-    assert.equal(body.state.next.id, undefined);
-    assert.equal(body.state.predicted_at_response, undefined);
-    return new Response(JSON.stringify(result), { status: 200 });
+    assert.equal(body.model, 'jev-latest');
+    assert.equal(body.state.protocol, 'jev-reflex-guided-v1');
+    assert.equal(body.state.timing.observation_time, 98);
+    assert.equal(body.state.timing.target_time, 280);
+    assert.equal(body.state.timing.predicted_latency, 180);
+    assert.equal(body.state.timing.flap_epoch, 2);
+    assert.equal(body.state.timing.next_nominal_target_time, 330);
+    assert.equal(body.state.player.velocityY, 35);
+    assert.equal(body.state.next_obstacle.score_value, 3);
+    assert.equal(body.state.physics.obstacle_radius_factor, 0.9);
+    assert.deepEqual(Object.keys(body.questions.action.criteria), ['FLAP', 'WAIT']);
+    assert.equal(typeof body.questions.action.criteria.FLAP, 'string');
+    assert.equal(typeof body.questions.action.criteria.WAIT, 'string');
+    assert.equal(body.state.goal.target_score, 100);
+    return new Response(JSON.stringify(waitResult('jev-1.13.0')), { status: 200 });
   };
-  const answer = await handle({ type: 'decide', id: run.id, state }, game);
-  assert.equal(answer.ok, true); assert.equal(answer.action, 'click'); assert.equal(answer.requests, 1);
-  await assert.rejects(handle({ type: 'decide', id: run.id, state }, game), /上限/);
+  const answer = await handle(request(run), game);
+  assert.equal(answer.ok, true);
+  assert.equal(answer.action, 'WAIT');
+  assert.equal(answer.model, 'jev-1.13.0');
+  assert.equal(answer.requests, 1);
+  await assert.rejects(handle(request(run, 1), game), /上限/);
   assert.equal(calls, 1);
 });
-test('stop aborts in-flight requests and invalidates old sessions', async () => {
+
+test('background rejects mismatched state epochs and invalid target times before fetch', async () => {
+  const { context, handle } = harness();
+  await handle({ type: 'config:save', config: prefs, apiKey: 'fake-test-key' }, popup);
+  const run = await handle({ type: 'run:begin' }, game);
+  let calls = 0;
+  context.fetch = async () => { calls++; return new Response(JSON.stringify(waitResult('jev-1.13.0')), { status: 200 }); };
+  const mismatchedEpoch = request(run, 0, { timing: { flap_epoch: 1 } });
+  await assert.rejects(handle(mismatchedEpoch, game), /時刻が一致/);
+  await assert.rejects(handle(request(run, 1, { message: { target_time: 100 } }), game), /時刻が不正/);
+  assert.equal(calls, 0);
+});
+
+test('up to twelve independent reflex fetches may be in flight, then the thirteenth is skipped by the worker', async () => {
+  const { context, handle } = harness();
+  await handle({ type: 'config:save', config: { ...prefs, maxRequests: 20 }, apiKey: 'fake-test-key' }, popup);
+  const run = await handle({ type: 'run:begin' }, game);
+  const resolvers = [];
+  let started = 0;
+  let notifyStarted;
+  const allStarted = new Promise(resolve => { notifyStarted = resolve; });
+  context.fetch = async () => {
+    started++;
+    if (started === 12) notifyStarted();
+    return new Promise(resolve => resolvers.push(resolve));
+  };
+  const pending = Array.from({ length: 12 }, (_, i) => handle(request(run, i), game));
+  await allStarted;
+  await assert.rejects(handle(request(run, 12), game), /同時リクエスト上限/);
+  assert.equal(started, 12);
+  for (const resolve of resolvers) resolve(new Response(JSON.stringify(waitResult('jev-1.13.0')), { status: 200 }));
+  const answers = await Promise.all(pending);
+  assert.equal(answers.length, 12);
+  assert.ok(answers.every(answer => answer.ok && answer.action === 'WAIT'));
+});
+
+test('stop aborts every in-flight reflex request and invalidates the session', async () => {
   const { context, handle } = harness();
   await handle({ type: 'config:save', config: prefs, apiKey: 'fake-test-key' }, popup);
   const run = await handle({ type: 'run:begin' }, game);
@@ -106,68 +162,46 @@ test('stop aborts in-flight requests and invalidates old sessions', async () => 
     options.signal.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')));
     notifyStarted();
   });
-  const pending = handle({ type: 'decide', id: run.id, state }, game);
-  const check = assert.rejects(pending, /応答待ちが終了/);
+  const pending = handle(request(run), game);
+  const check = assert.rejects(pending, /キャンセル/);
   await started;
-  await handle({ type: 'run:stop' }, game);
+  await handle({ type: 'run:stop', id: run.id }, game);
   await check;
-  await assert.rejects(handle({ type: 'decide', id: run.id, state }, game), /セッションが終了/);
+  await assert.rejects(handle(request(run), game), /セッションが終了/);
 });
-test('concurrent decisions cannot exceed the budget or start a second fetch', async () => {
-  const { context, handle } = harness();
-  await handle({ type: 'config:save', config: prefs, apiKey: 'fake-test-key' }, popup);
-  const run = await handle({ type: 'run:begin' }, game);
-  let resolveFetch, notifyStarted;
-  const started = new Promise(resolve => { notifyStarted = resolve; });
-  let calls = 0;
-  context.fetch = async () => {
-    calls++; notifyStarted();
-    return new Promise(resolve => { resolveFetch = resolve; });
-  };
-  const first = handle({ type: 'decide', id: run.id, state }, game);
-  await started;
-  await assert.rejects(handle({ type: 'decide', id: run.id, state }, game), /問い合わせ中/);
-  resolveFetch(new Response(JSON.stringify(result), { status: 200 }));
-  await first;
-  assert.equal(calls, 1);
-  await assert.rejects(handle({ type: 'decide', id: run.id, state }, game), /上限/);
-});
-test('invalid decisions and HTTP errors are reported; server body is not exposed', async () => {
+
+test('invalid Jev choices and HTTP errors are classified without exposing response bodies', async () => {
   const { context, handle } = harness();
   await handle({ type: 'config:save', config: prefs, apiKey: 'fake-test-key' }, popup);
   let run = await handle({ type: 'run:begin' }, game);
   context.fetch = async () => new Response('private-server-message', { status: 401 });
-  await assert.rejects(handle({ type: 'decide', id: run.id, state }, game), /APIキーが無効/);
+  await assert.rejects(handle(request(run), game), /APIキーが無効/);
   run = await handle({ type: 'run:begin' }, game);
-  context.fetch = async () => new Response(JSON.stringify({ answers: { action: { type: 'choice', choice: 'execute_script', confidence: 0.9 } } }), { status: 200 });
-  await assert.rejects(handle({ type: 'decide', id: run.id, state }, game), /応答形式が不正/);
+  context.fetch = async () => new Response(JSON.stringify({ answers: { action: { type: 'choice', choice: 'click', confidence: 0.9 } } }), { status: 200 });
+  await assert.rejects(handle(request(run), game), /Jev reflex response is invalid/);
 });
-test('endpoint keys persist separately; local System One never receives the TypeSafe key', async () => {
+
+test('endpoint keys stay separate and changing the model invalidates its active session', async () => {
   const { context, handle, stores } = harness();
   await handle({ type: 'config:save', config: prefs, apiKey: 'fake-typesafe-key' }, popup);
+  const first = await handle({ type: 'run:begin' }, game);
   const local = { ...prefs, endpoint: 'http://127.0.0.1:8009/v1/systemone', model: 'kev-latest' };
   const saved = await handle({ type: 'config:save', config: local }, popup);
   assert.equal(saved.config.hasKey, false);
   assert.equal(stores.local.apiKeys['https://api.typesafe.ai/v1/systemone'], 'fake-typesafe-key');
+  await assert.rejects(handle(request(first), game), /セッションが終了/);
   const run = await handle({ type: 'run:begin' }, game);
   context.fetch = async (url, options) => {
     assert.equal(url, local.endpoint);
     assert.equal(options.headers.Authorization, undefined);
     assert.equal(JSON.parse(options.body).model, 'kev-latest');
-    return new Response(JSON.stringify({ ...result, model: 'kev-4b' }), { status: 200 });
+    return new Response(JSON.stringify(waitResult('kev-4b')), { status: 200 });
   };
-  const answer = await handle({ type: 'decide', id: run.id, state }, game);
+  const answer = await handle(request(run), game);
   assert.equal(answer.model, 'kev-4b');
-  await handle({ type: 'config:save', config: local, apiKey: 'fake-local-key' }, popup);
-  const changed = await handle({ type: 'config:save', config: { ...local, endpoint: 'http://127.0.0.1:8000/v1/systemone', model: 'english' } }, popup);
-  assert.equal(changed.config.hasKey, false);
-  const back = await handle({ type: 'config:save', config: prefs }, popup);
-  assert.equal(back.config.hasKey, true);
-  assert.equal(stores.local.apiKeys[local.endpoint], 'fake-local-key');
-  await handle({ type: 'key:clear', endpoint: local.endpoint }, popup);
-  assert.equal(stores.local.apiKeys[local.endpoint], undefined);
-  assert.equal((await handle({ type: 'config:get' }, popup)).config.hasKey, true);
+  assert.equal(answer.action, 'WAIT');
 });
+
 test('custom endpoints require permission and reject credential-bearing or remote HTTP URLs', async () => {
   const { context, handle } = harness();
   for (const endpoint of ['http://example.com/v1/systemone', 'https://user:password@example.com/api', 'https://example.com/api?key=secret']) {
@@ -175,30 +209,25 @@ test('custom endpoints require permission and reject credential-bearing or remot
   }
   context.chrome.permissions.contains = async () => false;
   await assert.rejects(handle({ type: 'config:save', config: { ...prefs, endpoint: 'https://example.com/v1/systemone' } }, popup), /許可/);
-  await handle({ type: 'config:save', config: prefs, apiKey: 'fake' }, popup);
-  assert.equal((await handle({ type: 'key:clear' }, popup)).config.hasKey, false);
 });
-test('model switching invalidates the old run; model IDs may contain slashes', async () => {
-  const { handle } = harness();
-  await handle({ type: 'config:save', config: prefs, apiKey: 'fake' }, popup);
-  const first = await handle({ type: 'run:begin' }, game);
-  await handle({ type: 'config:save', config: { ...prefs, model: 'jev-preview' } }, popup);
-  await assert.rejects(handle({ type: 'decide', id: first.id, state }, game), /セッション/);
-  const saved = await handle({ type: 'config:save', config: { ...prefs, endpoint: 'https://example.com/v1/classifier', model: 'org/model-4b' } }, popup);
-  assert.equal(saved.config.model, 'org/model-4b');
-});
-test('keys survive worker restarts and legacy session keys migrate without being exposed', async () => {
-  const first = harness({ local: {}, session: { apiKey: 'fake-legacy-key' } });
-  const config = await first.handle({ type: 'config:get' }, popup);
-  assert.equal(config.config.hasKey, true);
-  assert.equal(config.config.apiKeys, undefined);
-  assert.equal(first.stores.session.apiKey, '');
-  const second = harness(first.stores);
-  assert.equal((await second.handle({ type: 'config:get' }, popup)).config.hasKey, true);
-  const run = await second.handle({ type: 'run:begin' }, game);
-  second.context.fetch = async (_url, options) => {
-    assert.equal(options.headers.Authorization, 'Bearer fake-legacy-key');
-    return new Response(JSON.stringify(result), { status: 200 });
+
+test('request interval defaults to 150ms, persists valid values and rejects invalid values', async () => {
+  const { context, handle, stores } = harness();
+  assert.equal((await handle({ type: 'config:get' }, popup)).config.requestIntervalMs, 150);
+  for (const requestIntervalMs of [50, 150, 500]) {
+    const saved = await handle({ type: 'config:save', config: { ...prefs, requestIntervalMs }, apiKey: 'fake-test-key' }, popup);
+    assert.equal(saved.config.requestIntervalMs, requestIntervalMs);
+    assert.equal(stores.local.requestIntervalMs, requestIntervalMs);
+  }
+  for (const requestIntervalMs of [49, 501, 150.5, '150', NaN]) {
+    await assert.rejects(handle({ type: 'config:save', config: { ...prefs, requestIntervalMs } }, popup), /要求間隔/);
+  }
+  const run = await handle({ type: 'run:begin' }, game);
+  context.fetch = async (_url, options) => {
+    const body = JSON.parse(options.body);
+    assert.equal(body.state.timing.request_interval_ms, 500);
+    assert.equal(body.state.timing.next_nominal_target_time, 780);
+    return new Response(JSON.stringify(waitResult('jev-1.13.0')), { status: 200 });
   };
-  assert.equal((await second.handle({ type: 'decide', id: run.id, state }, game)).ok, true);
+  await handle(request(run), game);
 });

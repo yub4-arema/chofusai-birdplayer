@@ -42,10 +42,19 @@
       const gapTop = bestStart / ry + inset;
       const gapBottom = bestEnd / ry - inset;
       if (gapBottom - gapTop < 35 * scale) continue;
+      // The game uses one solid color per obstacle pair. Retain that directly
+      // observed game fact, including the score shown by the public game rules.
+      let colorY = bestStart > 0 ? bestStart - 1 : bestEnd;
+      let colorIndex = (colorY * width + column) * 4;
+      if (data[colorIndex + 3] <= 120) {
+        colorY = Math.min(height - 1, bestEnd + 1);
+        colorIndex = (colorY * width + column) * 4;
+      }
+      const gold = data[colorIndex] > data[colorIndex + 1] && data[colorIndex + 1] > data[colorIndex + 2];
       obstacles.push({
         x: left / rx - inset,
         width: (right - left + 1) / rx + inset * 2,
-        gapTop, gapBottom
+        gapTop, gapBottom, type: gold ? "gold" : "gray", score_value: gold ? 3 : 1
       });
     }
     return {
@@ -117,6 +126,7 @@
   const REFLEX_MAX_IN_FLIGHT = 12;
   const REFLEX_MAX_LATE_MS = 250;
   const REFLEX_MAX_PREDICTION_MS = 1500;
+  const REFLEX_GOAL_SCORE = 100;
   function sanitizeReflexState(input) {
     if (!input || typeof input !== "object") throw new Error("Jev reflex state is invalid.");
     const number = (n, low, high) => {
@@ -131,38 +141,69 @@
     const gravity = number(input.physics?.gravity, 500, 3000);
     const flapVelocity = number(input.physics?.flapVelocity, -1000, -100);
     const speedX = number(input.physics?.speedX, 50, 500);
+    const maxFrameStepMs = number(input.physics?.max_frame_step_ms ?? 50, 1, 100);
+    const obstacleRadiusFactor = number(input.physics?.obstacle_radius_factor ?? 0.9, 0.1, 1);
     const obstacle = value => value == null ? null : ({
       x: number(value.x, -10000, 10000),
       horizontal_distance: number(value.horizontal_distance, -20000, 20000),
       width: number(value.width, 1, 500),
       gapTop: number(value.gapTop, -10000, 10000),
-      gapBottom: number(value.gapBottom, -10000, 10000)
+      gapBottom: number(value.gapBottom, -10000, 10000),
+      type: ["gray", "gold", "unknown"].includes(value.type) ? value.type : "unknown",
+      score_value: number(value.score_value ?? 0, 0, 100)
     });
     const next = obstacle(input.next_obstacle);
     const following = obstacle(input.following_obstacle);
+    const gameScore = number(input.game?.score ?? 0, 0, 1000000);
+    const targetScore = REFLEX_GOAL_SCORE;
+    const observationTime = number(input.timing?.observation_time ?? 0, 0, 1000000000);
     const targetTime = number(input.timing?.target_time, 0, 1000000000);
     const predictedLatency = number(input.timing?.predicted_latency, 0, 1500);
+    const requestInterval = number(input.timing?.request_interval_ms ?? REFLEX_REQUEST_INTERVAL_MS, 1, 1000);
+    const flapEpoch = input.timing?.flap_epoch ?? 0;
+    if (!Number.isSafeInteger(flapEpoch) || flapEpoch < 0) throw new Error("Jev reflex epoch is invalid.");
+    const lastFlapTime = number(input.timing?.last_flap_time ?? observationTime, 0, 1000000000);
+    const sinceLastFlap = number(input.timing?.since_last_flap_ms ?? Math.max(0, targetTime - lastFlapTime), 0, 1000000000);
     const gapPosition = !next ? "no_obstacle"
       : playerY < next.gapTop ? "above_gap"
         : playerY > next.gapBottom ? "below_gap" : "inside_gap";
+    const gapHalf = gapPosition !== "inside_gap" ? null
+      : playerY < (next.gapTop + next.gapBottom) / 2 ? "upper_half" : "lower_half";
+    const motion = velocityY < -0.5 ? "rising" : velocityY > 0.5 ? "falling" : "level";
+    const screenPosition = playerY < height / 4 ? "top quarter"
+      : playerY < height / 2 ? "upper half"
+        : playerY < height * 3 / 4 ? "lower half" : "bottom quarter";
+    const gapDescription = !next ? "No obstacle is visible."
+      : `The bird is ${gapPosition === "inside_gap" ? `inside the gap, ${gapHalf === "upper_half" ? "upper" : "lower"} half` : gapPosition === "above_gap" ? "above the gap" : "below the gap"}. The next obstacle is ${Math.round(next.x - playerX)} pixels horizontally from the bird.`;
     return {
-      protocol: "jev-reflex-neutral-v1",
-      screen: { height },
+      protocol: "jev-reflex-guided-v1",
+      goal: { target_score: targetScore, objective: "Stay alive and pass obstacles to increase the displayed score." },
+      description: `The bird is in the ${screenPosition} of the screen and ${motion}. ${gapDescription}`,
+      screen: { height, wallTop: 0, wallBottom: height },
 
-      player: { x: playerX, y: playerY, velocityY, radius },
+      player: { x: playerX, y: playerY, velocityY, radius,
+        ceiling_clearance: Math.round((playerY - radius) * 100) / 100,
+        floor_clearance: Math.round((height - playerY - radius) * 100) / 100 },
 
+      game: { score: gameScore },
       next_obstacle: next,
       following_obstacle: following,
-      physics: { gravity, flapVelocity, speedX },
-      timing: { target_time: targetTime, predicted_latency: predictedLatency, unit: "ms_since_run_start" },
+      physics: { gravity, flapVelocity, speedX, max_frame_step_ms: maxFrameStepMs, obstacle_radius_factor: obstacleRadiusFactor },
+      timing: {
+        observation_time: observationTime, target_time: targetTime, predicted_latency: predictedLatency,
+        request_interval_ms: requestInterval, next_nominal_target_time: targetTime + requestInterval,
+        flap_epoch: flapEpoch, last_flap_time: lastFlapTime, since_last_flap_ms: sinceLastFlap,
+        unit: "ms_since_run_start"
+      },
       observations: {
-        vertical_motion: velocityY < -0.5 ? "rising" : velocityY > 0.5 ? "falling" : "level",
+        vertical_motion: motion,
         relative_to_next_gap: gapPosition,
+        next_gap_half: gapHalf,
         screen_half: playerY < height / 2 ? "upper_half" : "lower_half"
       }
     };
   }
-  function predictReflexState(input, deltaMs, targetTime, predictedLatency) {
+  function predictReflexState(input, deltaMs, targetTime, predictedLatency, observationTime, requestIntervalMs = REFLEX_REQUEST_INTERVAL_MS, flapEpoch = 0, lastFlapTime) {
     if (!input || typeof input !== "object") throw new Error("Observed game state is invalid.");
     if (!Number.isFinite(deltaMs) || deltaMs < 0 || deltaMs > REFLEX_MAX_PREDICTION_MS) {
       throw new Error("Prediction interval is out of range.");
@@ -175,10 +216,12 @@
     const gravity = input.physics?.gravity;
     const flapVelocity = input.physics?.flapVelocity;
     const speedX = input.physics?.speedX;
+    const maxFrameStepMs = input.physics?.max_frame_step_ms ?? 50;
+    const obstacleRadiusFactor = input.physics?.obstacle_radius_factor ?? 0.9;
     const next = input.next_obstacle ? { ...input.next_obstacle } : null;
     const following = input.following_obstacle ? { ...input.following_obstacle } : null;
     const obstacleValues = [next, following].filter(Boolean);
-    if (![height, playerX, playerY, velocityY, radius, gravity, flapVelocity, speedX].every(Number.isFinite) ||
+    if (![height, playerX, playerY, velocityY, radius, gravity, flapVelocity, speedX, maxFrameStepMs, obstacleRadiusFactor].every(Number.isFinite) ||
         obstacleValues.some(o => ![o.x, o.width, o.gapTop, o.gapBottom].every(Number.isFinite))) {
       throw new Error("Observed game state is invalid.");
     }
@@ -194,14 +237,26 @@
     }
     const toObstacle = obstacle => obstacle && ({
       x: obstacle.x, horizontal_distance: obstacle.x - playerX,
-      width: obstacle.width, gapTop: obstacle.gapTop, gapBottom: obstacle.gapBottom
+      width: obstacle.width, gapTop: obstacle.gapTop, gapBottom: obstacle.gapBottom,
+      type: obstacle.type ?? "unknown", score_value: obstacle.score_value ?? 0
     });
+    // The target can fall after a visible obstacle has passed the bird. Promote
+    // the following visible obstacle using projected geometry, without choosing
+    // an action or inventing unseen obstacles.
+    const upcoming = obstacleValues.filter(obstacle => obstacle.x + obstacle.width >= playerX - radius).sort((a, b) => a.x - b.x);
     return sanitizeReflexState({
       screen: { height },
       player: { x: playerX, y: playerY, velocityY, radius },
-      next_obstacle: toObstacle(next), following_obstacle: toObstacle(following),
-      physics: { gravity, flapVelocity, speedX },
-      timing: { target_time: targetTime, predicted_latency: predictedLatency }
+      game: input.game, goal: input.goal,
+      next_obstacle: toObstacle(upcoming[0]) ?? null, following_obstacle: toObstacle(upcoming[1]) ?? null,
+      physics: { gravity, flapVelocity, speedX, max_frame_step_ms: maxFrameStepMs, obstacle_radius_factor: obstacleRadiusFactor },
+      timing: {
+        observation_time: observationTime ?? Math.max(0, targetTime - deltaMs),
+        target_time: targetTime, predicted_latency: predictedLatency,
+        request_interval_ms: requestIntervalMs, next_nominal_target_time: targetTime + requestIntervalMs,
+        flap_epoch: flapEpoch, last_flap_time: lastFlapTime ?? (observationTime ?? Math.max(0, targetTime - deltaMs)),
+        since_last_flap_ms: Math.max(0, targetTime - (lastFlapTime ?? (observationTime ?? Math.max(0, targetTime - deltaMs))))
+      }
     });
   }
   function buildReflexRequest(state, model) {
@@ -211,17 +266,16 @@
         action: {
           type: "choice",
           instructions: {
-            task: "For the supplied state at timing.target_time, choose exactly one input: FLAP or WAIT.",
+            task: `Goal: keep the bird alive and reach a displayed score of ${REFLEX_GOAL_SCORE} by passing obstacles. Choose FLAP or WAIT at timing.target_time.`,
             rules: [
-              "The player y coordinate increases downward. velocityY is pixels per second, gravity is pixels per second squared, and obstacle positions are pixels.",
-              "timing.target_time is milliseconds from game start. The supplied position, velocity, and obstacle positions are extrapolated to that time from the latest rendered observation using the listed physics.",
-              "At timing.target_time, FLAP is one standard game click and sets velocityY to flapVelocity. WAIT is no input; existing motion continues under gravity and obstacles continue moving at speedX.",
-              "The extension applies your selected input once at timing.target_time. No local action recommendation or collision result is included."
+              "Coordinates are CSS pixels; y increases downwards. player.x/y are the bird's centre; negative velocityY means rising. obstacle.x is its left edge, with an opening from gapTop to gapBottom. Passing gray earns 1 point; gold earns 3.",
+              "Gravity pulls the bird down: each frame updates velocityY += gravity*dt, then y += velocityY*dt. dt is capped by max_frame_step_ms. Obstacles move left at speedX. Touching a wall or obstacle ends the game. Wall contact uses player.radius; obstacle contact uses radius * obstacle_radius_factor.",
+              "Positions and velocities already describe target_time. Do not advance them again for latency. All times are milliseconds since run start. Requests arrive every request_interval_ms; responses take predicted_latency approximately while the game continues. FLAP invalidates outstanding replies for the previous flap_epoch. Return only the selected option."
             ]
           },
           criteria: {
-            FLAP: { effect: "At target_time, issue exactly one click. It sets velocityY to flapVelocity." },
-            WAIT: { effect: "At target_time, issue no input. Current motion continues under gravity and obstacles move at speedX." }
+            FLAP: "Flap once, resetting upward velocity to physics.flapVelocity: the bird is below the next gap, or inside its lower half and not rising. When no obstacle is visible, flap in the lower half of the screen when not rising. Avoid the floor even while a pipe is far away.",
+            WAIT: "No click: the bird is above the next gap (even when falling), inside its upper half, or rising inside the gap. When no obstacle is visible, wait in the upper half of the screen or while rising. Avoid repeated flaps toward the ceiling."
           }
         }
       }
@@ -424,6 +478,6 @@
   }
   globalThis.ChofuJev = Object.freeze({ observe, buildRequest, parseDecision, sanitizeState, estimateLatency, endpoint, originPattern,
     predictReflexState, sanitizeReflexState, buildReflexRequest, parseReflexDecision, reflexDiscardReason,
-    REFLEX_REQUEST_INTERVAL_MS, REFLEX_MAX_IN_FLIGHT, REFLEX_MAX_LATE_MS,
+    REFLEX_REQUEST_INTERVAL_MS, REFLEX_MAX_IN_FLIGHT, REFLEX_MAX_LATE_MS, REFLEX_GOAL_SCORE,
     buildPlanRequest, parsePlanDecision, sanitizePlanState, planOptions, PLAN_SLOT_MS, PLAN_HORIZON_MS, PLAN_REPLAN_MS });
 })();
