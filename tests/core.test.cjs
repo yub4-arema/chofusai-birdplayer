@@ -120,6 +120,18 @@ test('decision parsing and response invalidation enforce the two-choice epoch co
   assert.equal(Jev.reflexDiscardReason(request, 4, 1010, true), 'game_over');
 });
 
+test('standard System One profiles stringify the full guidance and Cloudflare unwraps its result envelope', () => {
+  const request = Jev.buildSystemOneRequest({ protocol: 'jev-reflex-guided-v1' }, 'd1');
+  assert.equal(request.model, 'd1');
+  assert.equal(typeof request.questions.action.instructions, 'string');
+  assert.match(request.questions.action.instructions, /Coordinates are CSS pixels/);
+  assert.match(request.questions.action.instructions, /Examples:/);
+  assert.deepEqual(Object.keys(request.questions.action.criteria), ['FLAP', 'WAIT']);
+  assert.equal(Jev.parseCloudflareDecision({ success: true, errors: [], result: { model: 'clef', answers: { action: { type: 'choice', choice: 'FLAP' } } } }).action, 'FLAP');
+  assert.throws(() => Jev.parseCloudflareDecision({ success: false, errors: [{ message: 'bad token' }], result: {} }));
+  assert.throws(() => Jev.parseCloudflareDecision({ success: true, errors: [], result: { answers: { action: { type: 'choice', choice: 'click' } } } }));
+});
+
 
 test('a measured slow connection immediately replaces historical fast priors', () => {
   assert.equal(Jev.estimateLatency([400, 410, 420]).typical_ms, 410);

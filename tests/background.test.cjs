@@ -202,6 +202,69 @@ test('endpoint keys stay separate and changing the model invalidates its active 
   assert.equal(answer.action, 'WAIT');
 });
 
+test('older custom endpoint settings migrate to the Custom profile without requiring a key', async () => {
+  const endpoint = 'http://127.0.0.1:8000/v1/systemone';
+  const { context, handle } = harness({ local: { endpoint, model: 'english' }, session: {} });
+  const config = (await handle({ type: 'config:get' }, popup)).config;
+  assert.equal(config.provider, 'custom');
+  const run = await handle({ type: 'run:begin' }, game);
+  context.fetch = async () => new Response(JSON.stringify(waitResult('english')), { status: 200 });
+  assert.equal((await handle(request(run), game)).action, 'WAIT');
+});
+
+test('Liquid d1 and Laya use string guidance while preserving per-endpoint authentication', async () => {
+  const { context, handle, stores } = harness();
+  const profiles = [
+    { provider: 'liquid-d1', endpoint: 'https://api.liquid.ai/decisions/v1/systemone', model: 'd1', key: 'fake-liquid-key' },
+    { provider: 'laya', endpoint: 'http://127.0.0.1:8000/v1/systemone', model: 'english' }
+  ];
+  for (const profile of profiles) {
+    await handle({ type: 'config:save', config: { ...prefs, ...profile }, ...(profile.key ? { apiKey: profile.key } : {}) }, popup);
+    const run = await handle({ type: 'run:begin' }, game);
+    context.fetch = async (url, options) => {
+      assert.equal(url, profile.endpoint);
+      assert.equal(options.headers.Authorization, profile.key ? `Bearer ${profile.key}` : undefined);
+      const body = JSON.parse(options.body);
+      assert.equal(body.model, profile.model);
+      assert.equal(typeof body.questions.action.instructions, 'string');
+      return new Response(JSON.stringify(waitResult(profile.model)), { status: 200 });
+    };
+    assert.equal((await handle(request(run), game)).action, 'WAIT');
+  }
+  assert.equal(stores.local.apiKeys[profiles[0].endpoint], profiles[0].key);
+});
+
+test('Cloudflare Clef profiles use their official routes and unwrap API errors and decisions', async () => {
+  const { context, handle, stores } = harness();
+  const accountId = '0123456789abcdef0123456789abcdef';
+  for (const [provider, model, key, choice] of [
+    ['cloudflare-clef', 'clef', 'fake-cf-clef-token', 'FLAP'],
+    ['cloudflare-clef-flash', 'clef-flash', 'fake-cf-flash-token', 'WAIT']
+  ]) {
+    const endpoint = `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/run/@cf/cloudflare/${model}`;
+    await handle({ type: 'config:save', config: { ...prefs, provider, accountId, endpoint, model }, apiKey: key }, popup);
+    assert.equal(stores.local.apiKeys[endpoint], key);
+    const run = await handle({ type: 'run:begin' }, game);
+    context.fetch = async (url, options) => {
+      assert.equal(url, endpoint);
+      assert.equal(options.headers.Authorization, `Bearer ${key}`);
+      const body = JSON.parse(options.body);
+      assert.equal(body.model, model);
+      assert.equal(typeof body.questions.action.instructions.task, 'string');
+      return new Response(JSON.stringify({ success: true, errors: [], result: { model, answers: { action: { type: 'choice', choice } } } }), { status: 200 });
+    };
+    assert.equal((await handle(request(run), game)).action, choice);
+  }
+  await assert.rejects(handle({ type: 'config:save', config: { ...prefs, provider: 'cloudflare-clef', accountId: 'short', model: 'clef' } }, popup), /32桁/);
+  const run = await handle({ type: 'run:begin' }, game);
+  for (const [index, status] of [400, 401, 403, 429].entries()) {
+    context.fetch = async () => new Response('private error body', { status });
+    await assert.rejects(handle(request(run, index + 1), game), new RegExp(`HTTP ${status}`));
+  }
+  context.fetch = async () => new Response(JSON.stringify({ success: false, errors: [{ message: 'invalid token' }], result: null }), { status: 200 });
+  await assert.rejects(handle(request(run, 5), game), /Cloudflare Workers AI response is invalid/);
+});
+
 test('custom endpoints require permission and reject credential-bearing or remote HTTP URLs', async () => {
   const { context, handle } = harness();
   for (const endpoint of ['http://example.com/v1/systemone', 'https://user:password@example.com/api', 'https://example.com/api?key=secret']) {

@@ -307,6 +307,21 @@
       }
     };
   }
+  function buildSystemOneRequest(state, model) {
+    const request = buildReflexRequest(state, model);
+    const action = request.questions.action;
+    const guide = action.instructions;
+    action.instructions = [guide.task, "Rules:", ...guide.rules.map(rule => `- ${rule}`), "Examples:",
+      ...guide.examples.map(example => `- ${JSON.stringify(example)}`)].join("\n");
+    return request;
+  }
+  function parseCloudflareDecision(result) {
+    const errorsValid = result?.errors === undefined || (Array.isArray(result.errors) && result.errors.length === 0);
+    if (!result || result.success !== true || !result.result || typeof result.result !== "object" || !errorsValid) {
+      throw new Error("Cloudflare Workers AI response is invalid.");
+    }
+    return parseReflexDecision(result.result);
+  }
   function parseReflexDecision(result) {
     const answer = result?.answers?.action;
     const confidence = answer?.confidence ?? answer?.answer_confidence ?? null;
@@ -503,7 +518,7 @@
     };
   }
   globalThis.ChofuJev = Object.freeze({ observe, buildRequest, parseDecision, sanitizeState, estimateLatency, endpoint, originPattern,
-    predictReflexState, sanitizeReflexState, buildReflexRequest, parseReflexDecision, reflexDiscardReason,
+    predictReflexState, sanitizeReflexState, buildReflexRequest, buildSystemOneRequest, parseReflexDecision, parseCloudflareDecision, reflexDiscardReason,
     REFLEX_REQUEST_INTERVAL_MS, REFLEX_MAX_IN_FLIGHT, REFLEX_MAX_LATE_MS,
     buildPlanRequest, parsePlanDecision, sanitizePlanState, planOptions, PLAN_SLOT_MS, PLAN_HORIZON_MS, PLAN_REPLAN_MS });
 })();

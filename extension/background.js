@@ -1,7 +1,8 @@
 "use strict";
 importScripts("core.js");
 const REFLEX_MODE = "jev-reflex-guided";
-const defaults = { mode: REFLEX_MODE, endpoint: "https://api.typesafe.ai/v1/systemone", model: "jev-latest", maxRequests: 0, autoRestart: false, requestIntervalMs: 100 };
+const defaults = { mode: REFLEX_MODE, provider: "jev", accountId: "", endpoint: "https://api.typesafe.ai/v1/systemone", model: "jev-latest", maxRequests: 0, autoRestart: false, requestIntervalMs: 100 };
+const providerNames = ["jev", "cloudflare-clef", "cloudflare-clef-flash", "liquid-d1", "laya", "custom"];
 const sessions = new Map();
 const ready = (async () => {
   await Promise.all([
@@ -40,11 +41,12 @@ function end(tabId) {
 }
 async function config() {
   await ready;
-  const [prefs, stored] = await Promise.all([chrome.storage.local.get(defaults), keys()]);
+  const [prefs, explicit, stored] = await Promise.all([chrome.storage.local.get(defaults), chrome.storage.local.get("provider"), keys()]);
   // The current source uses guided reflex play. Keep connection settings when
   // migrating neutral or earlier control modes.
   if (prefs.mode !== REFLEX_MODE) await chrome.storage.local.set({ mode: REFLEX_MODE });
-  return { ...prefs, mode: REFLEX_MODE, hasKey: Boolean(stored[prefs.endpoint]) };
+  const provider = providerNames.includes(explicit.provider) ? explicit.provider : (prefs.endpoint === defaults.endpoint ? "jev" : "custom");
+  return { ...prefs, provider, mode: REFLEX_MODE, hasKey: Boolean(stored[prefs.endpoint]) };
 }
 function requestError(message, failureClass = "harness") {
   const error = new Error(message);
@@ -53,6 +55,7 @@ function requestError(message, failureClass = "harness") {
 }
 async function decideReflex(session, tabId, message) {
   const requestId = message.request_id;
+  const serviceName = session.prefs.provider.startsWith("cloudflare-") ? "Cloudflare Workers AI" : session.prefs.provider === "liquid-d1" ? "Liquid AI" : session.prefs.provider === "laya" ? "Laya" : "Jev";
   if (typeof requestId !== "string" || requestId.length < 1 || requestId.length > 100 ||
       session.seenRequestIds.has(requestId)) throw requestError("リクエストIDが不正です。");
   if (session.prefs.maxRequests > 0 && session.count >= session.prefs.maxRequests) throw requestError("設定したAPI呼び出し上限に達しました。");
@@ -96,14 +99,19 @@ async function decideReflex(session, tabId, message) {
   try {
     phase = "credentials";
     const apiKey = (await keys())[session.prefs.endpoint];
-    if (new URL(session.prefs.endpoint).origin === "https://api.typesafe.ai" && !apiKey) {
+    const needsKey = ["jev", "cloudflare-clef", "cloudflare-clef-flash", "liquid-d1"].includes(session.prefs.provider);
+    if (needsKey && !apiKey) {
       throw requestError("APIキーがありません。拡張機能から再設定してください。", "api_error");
     }
     if (session.prefs.endpoint !== defaults.endpoint && !await chrome.permissions.contains({ origins: [ChofuJev.originPattern(session.prefs.endpoint)] })) {
       throw requestError("接続先へのアクセス権がありません。", "api_error");
     }
     if (sessions.get(tabId) !== session) throw requestError("セッションが終了しました。", "cancelled");
-    const body = JSON.stringify(ChofuJev.buildReflexRequest(message.state, session.prefs.model));
+    const standard = ["liquid-d1", "laya"].includes(session.prefs.provider);
+    const request = standard ? ChofuJev.buildSystemOneRequest(message.state, session.prefs.model) : ChofuJev.buildReflexRequest(message.state, session.prefs.model);
+    const cloudflare = session.prefs.provider === "cloudflare-clef" || session.prefs.provider === "cloudflare-clef-flash";
+    if (cloudflare) request.model = session.prefs.model;
+    const body = JSON.stringify(request);
     phase = "network";
     timer = setTimeout(() => { timedOut = true; controller.abort(); }, 2500);
     const started = performance.now();
@@ -114,12 +122,12 @@ async function decideReflex(session, tabId, message) {
     });
     if (!response.ok) {
       const reasons = { 401: "APIキーが無効です", 403: "APIへのアクセス権がありません", 429: "APIの利用制限に達しました" };
-      throw requestError(`Jev API: ${reasons[response.status] ?? "接続エラー"} (HTTP ${response.status})`, "api_error");
+      throw requestError(`${serviceName}: ${reasons[response.status] ?? "接続エラー"} (HTTP ${response.status})`, "api_error");
     }
     phase = "response";
     const result = await response.json();
     phase = "jev_decision";
-    const decision = ChofuJev.parseReflexDecision(result);
+    const decision = cloudflare ? ChofuJev.parseCloudflareDecision(result) : ChofuJev.parseReflexDecision(result);
     if (sessions.get(tabId) !== session) throw requestError("セッションが終了しました。", "cancelled");
     return {
       ok: true, ...decision, request_id: requestId,
@@ -128,9 +136,9 @@ async function decideReflex(session, tabId, message) {
   } catch (error) {
     if (error.failureClass) throw error;
     if (error.name === "AbortError") {
-      throw requestError(timedOut ? "Jevの応答がタイムアウトしました。" : "リクエストがキャンセルされました。", timedOut ? "network_latency" : "cancelled");
+      throw requestError(timedOut ? `${serviceName}の応答がタイムアウトしました。` : "リクエストがキャンセルされました。", timedOut ? "network_latency" : "cancelled");
     }
-    if (error instanceof TypeError && phase === "network") throw requestError("Jev APIに接続できません。ネットワークを確認してください。", "network_latency");
+    if (error instanceof TypeError && phase === "network") throw requestError(`${serviceName}に接続できません。ネットワークを確認してください。`, "network_latency");
     throw requestError(error.message, phase === "jev_decision" ? "jev_decision" : phase === "response" ? "jev_response" : "harness");
   } finally {
     clearTimeout(timer);
@@ -149,21 +157,30 @@ async function handle(message, sender) {
   }
   if (message?.type === "config:save" && isPopup(sender)) {
     const prefs = message.config;
+    const provider = providerNames.includes(prefs?.provider) ? prefs.provider : (prefs?.endpoint && prefs.endpoint !== defaults.endpoint ? "custom" : "jev");
+    if (provider.startsWith("cloudflare-") && (typeof prefs.accountId !== "string" || !/^[a-f0-9]{32}$/i.test(prefs.accountId))) throw new Error("Cloudflare Account IDは32桁の16進数で入力してください。");
     if (!prefs || typeof prefs.model !== "string" || !/^[a-zA-Z0-9][a-zA-Z0-9._:/@+-]{0,199}$/.test(prefs.model) ||
         !Number.isSafeInteger(prefs.maxRequests) || prefs.maxRequests < 0) throw new Error("設定値を確認してください。");
     const requestIntervalMs = prefs.requestIntervalMs ?? defaults.requestIntervalMs;
     if (!Number.isInteger(requestIntervalMs) || requestIntervalMs < 50 || requestIntervalMs > 500) throw new Error("要求間隔を確認してください。");
-    const endpoint = ChofuJev.endpoint(prefs.endpoint ?? defaults.endpoint);
+    let requestedEndpoint = prefs.endpoint ?? defaults.endpoint;
+    if (provider.startsWith("cloudflare-")) {
+      const model = provider === "cloudflare-clef" ? "clef" : "clef-flash";
+      requestedEndpoint = `https://api.cloudflare.com/client/v4/accounts/${prefs.accountId}/ai/run/@cf/cloudflare/${model}`;
+      if (prefs.model !== model) throw new Error("CloudflareモデルIDは選択したモデルに合わせてください。");
+    }
+    if (provider === "liquid-d1" && prefs.model !== "d1") throw new Error("Liquid d1のモデルIDはd1にしてください。");
+    const endpoint = ChofuJev.endpoint(requestedEndpoint);
     if (endpoint !== defaults.endpoint && !await chrome.permissions.contains({ origins: [ChofuJev.originPattern(endpoint)] })) throw new Error("接続先へのアクセスを許可してください。");
     if (message.apiKey !== undefined && (typeof message.apiKey !== "string" || message.apiKey.length > 512)) throw new Error("APIキーを確認してください。");
     const previous = await config();
-    if (previous.endpoint !== endpoint || previous.model !== prefs.model) for (const id of [...sessions.keys()]) end(id);
+    if (previous.endpoint !== endpoint || previous.model !== prefs.model || previous.provider !== provider) for (const id of [...sessions.keys()]) end(id);
     if (message.apiKey !== undefined) {
       const stored = await keys();
       if (message.apiKey.trim()) stored[endpoint] = message.apiKey.trim(); else delete stored[endpoint];
       await chrome.storage.local.set({ apiKeys: stored });
     }
-    await chrome.storage.local.set({ mode: REFLEX_MODE, endpoint, model: prefs.model, maxRequests: prefs.maxRequests, autoRestart: Boolean(prefs.autoRestart), requestIntervalMs });
+    await chrome.storage.local.set({ mode: REFLEX_MODE, provider, accountId: provider.startsWith("cloudflare-") ? prefs.accountId : (prefs.accountId ?? ""), endpoint, model: prefs.model, maxRequests: prefs.maxRequests, autoRestart: Boolean(prefs.autoRestart), requestIntervalMs });
     return { ok: true, config: await config() };
   }
   if (message?.type?.startsWith("config:")) throw new Error("設定の操作は拡張機能のポップアップ専用です。");
@@ -177,7 +194,7 @@ async function handle(message, sender) {
     try {
       const prefs = await config();
       if (sessions.get(tabId) !== starting) throw new Error("開始をキャンセルしました。");
-      if (new URL(prefs.endpoint).origin === "https://api.typesafe.ai" && !prefs.hasKey) throw new Error("拡張機能でTypeSafe APIキーを設定してください。");
+      if (["jev", "cloudflare-clef", "cloudflare-clef-flash", "liquid-d1"].includes(prefs.provider) && !prefs.hasKey) throw new Error("拡張機能でAPIキーを設定してください。");
       starting.prefs = prefs;
       return { ok: true, id, config: prefs };
     } catch (error) {

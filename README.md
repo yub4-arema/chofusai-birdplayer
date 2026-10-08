@@ -43,16 +43,22 @@ Jevがリアルタイムに `FLAP` / `WAIT` を選びます。画面から読み
 
 ## モデルと接続先
 
-「接続先URL」「モデルID」を変えて「保存して開始」を押します。別の接続先のキーは送信しません。追加の接続先を保存する際はChromeがアクセス許可を求めます。
+「接続プロファイル」から Jev / Cloudflare Clef / Clef Flash / Liquid d1 / Laya / Custom System One を選びます。キーは接続先URLごとに保存され、切り替えても混ざりません。追加の接続先を保存する際はChromeがアクセス許可を求めます。
 
-| サービス | 接続先URLの例 | モデルIDの例 |
-|---|---|---|
-| TypeSafe | `https://api.typesafe.ai/v1/systemone` | `jev-latest` / `jev-preview` |
-| [Kev](https://github.com/jaredpalmer/kev) | `http://127.0.0.1:8009/v1/systemone` | `kev-latest` |
-| [Laya](https://github.com/NandhaKishorM/laya) | `http://127.0.0.1:8000/v1/systemone` | `english` / `multilingual` / `typed-decisions` |
-| [LocalJev](https://github.com/githubnext/localjev) | `http://127.0.0.1:8080/v1/systemone` | サーバー側のモデルID |
+| プロファイル | 接続先 | モデル | 認証 |
+|---|---|---|---|
+| TypeSafe Jev | `https://api.typesafe.ai/v1/systemone` | `jev-latest` / `jev-preview` | TypeSafe APIキー |
+| Cloudflare Clef | Cloudflare公式 Workers AI REST（Account IDから生成） | `clef` | Cloudflare API Token |
+| Cloudflare Clef Flash | Cloudflare公式 Workers AI REST（Account IDから生成） | `clef-flash` | Cloudflare API Token |
+| Liquid AI d1 | `https://api.liquid.ai/decisions/v1/systemone` | `d1` | Liquid APIキー |
+| Laya | `http://127.0.0.1:8000/v1/systemone` | `english` / `multilingual` / `typed-decisions` | 任意（`LAYA_API_KEY` 使用時） |
+| Custom System One | 任意の許可済み接続先 | サーバーに合わせる | 接続先に合わせる |
 
-ローカルモデルのサーバーは別途起動してください。これらの実モデルを起動する検証は今回行っていません。APIは `{ model, state, questions }` 形式、`questions.action` はChoiceの `FLAP` / `WAIT` に対応する必要があります。
+Cloudflareではアカウントの32桁 Account ID とAPI Tokenを入力します。拡張機能は選択中のClefモデルに対応する公式URLを生成し、`Authorization: Bearer` で送信します。Liquid d1とLayaはSystem One互換の標準プロファイルで `instructions` を文字列に整形します。既存Jevプロファイルのリクエスト形式は維持しています。
+
+Layaサーバーは別途起動してください。KevやLocalJevなど以前の任意System OneサーバーもCustomで接続できます。外部APIへの実ネットワーク検証はAPIキーが必要なため実施していません。モックテストの成功は実サービスへの接続確認を意味しません。
+
+公式資料: [Cloudflare Clef](https://developers.cloudflare.com/workers-ai/models/clef/)、[Clef Flash](https://developers.cloudflare.com/workers-ai/models/clef-flash/)、[Liquid AI d1](https://www.liquid.ai/blog/d1-decision-model)、[Laya HTTP API](https://github.com/NandhaKishorM/laya/blob/main/docs/http-api.md)。
 
 ## 判断と通信
 
@@ -78,7 +84,7 @@ node --check extension/background.js
 node --check extension/popup.js
 ```
 
-自動テストは28件通過しました。診断ログの送信・応答・採用・破棄・操作反映、画面上の集計表示、JSON出力をテスト用Chrome API実装で確認しています。実Chrome上での今回の描画確認は未実施です。詳細は[検証記録](docs/realtime-benchmark.md)を参照してください。
+自動テストでは各接続プロファイルの送信形式、認証ヘッダー、Cloudflareレスポンスの正規化をモックで確認します。実サービスの接続には各サービスの有効なキーが必要です。実Chrome上での今回の描画確認は未実施です。詳細は[検証記録](docs/realtime-benchmark.md)を参照してください。
 
 `tools/summarize-logs.mjs` と過去の診断資料は旧版の保存済みログ向けです。現在の診断ログはこのページの実行中メモリに保持し、JSON出力はユーザーが操作した時だけ行います。
 

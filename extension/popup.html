@@ -3,29 +3,38 @@
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>調布祭 Flappy × Jev</title><link rel="stylesheet" href="popup.css"></head>
 <body>
   <main>
-    <p class="eyebrow">TYPE SAFE DECISIONS / FLAPPY · v1.4.0-r3</p>
+    <p class="eyebrow">SYSTEM ONE DECISIONS / FLAPPY</p>
     <h1>調布祭 Flappy × Jev</h1>
     <p class="intro">Jevがリアルタイムに操作を判断します。接続先とモデルを選んでください。</p>
     <form id="settings">
-      <label>プレイ方法</label>
-      <small>Jevがクリックするか待つかを選び、得点を伸ばします。</small>
-      <label for="requestInterval">Jevへの要求間隔（ms）</label>
+      <label for="provider">接続プロファイル</label>
+      <select id="provider">
+        <option value="jev">TypeSafe Jev</option>
+        <option value="cloudflare-clef">Cloudflare Clef</option>
+        <option value="cloudflare-clef-flash">Cloudflare Clef Flash</option>
+        <option value="liquid-d1">Liquid AI d1</option>
+        <option value="laya">Laya（ローカル）</option>
+        <option value="custom">Custom System One</option>
+      </select>
+      <small>Jev / Cloudflare / Liquid / Layaの形式を選びます。Customは既存の接続先形式を使います。</small>
+      <label for="accountId" id="accountLabel" hidden>Cloudflare Account ID</label>
+      <input id="accountId" type="text" spellcheck="false" autocomplete="off" maxlength="32" hidden placeholder="32桁の16進数">
+      <label for="requestInterval">モデルへの要求間隔（ms）</label>
       <input id="requestInterval" type="number" min="50" max="500" step="1" value="100" required>
       <small>推奨は100ms。開始前に応答速度を確認します。長くすると呼び出し数が減り、操作の機会も少なくなります。次の開始から反映します。</small>
       <label for="endpoint">接続先URL</label>
       <input id="endpoint" type="url" value="https://api.typesafe.ai/v1/systemone" list="endpoints" spellcheck="false" required maxlength="2048">
       <datalist id="endpoints">
         <option value="https://api.typesafe.ai/v1/systemone" label="TypeSafe"></option>
-        <option value="http://127.0.0.1:8009/v1/systemone" label="Kev"></option>
+        <option value="https://api.liquid.ai/decisions/v1/systemone" label="Liquid AI d1"></option>
         <option value="http://127.0.0.1:8000/v1/systemone" label="Laya"></option>
-        <option value="http://127.0.0.1:8080/v1/systemone" label="LocalJev"></option>
       </datalist>
-      <label for="apiKey">APIキー（不要なサーバーは空欄）</label>
+      <label for="apiKey">APIキー／トークン</label>
       <input id="apiKey" type="password" autocomplete="off" spellcheck="false" placeholder="キーを入力">
       <small id="keyStatus">キーは接続先ごとにChrome内へ保存します。</small>
       <label for="model">モデルID</label>
       <input id="model" value="jev-latest" list="models" spellcheck="false" required maxlength="200">
-      <datalist id="models"><option value="jev-latest"></option><option value="jev-preview"></option><option value="kev-latest"></option><option value="english"></option><option value="multilingual"></option><option value="typed-decisions"></option></datalist>
+      <datalist id="models"><option value="jev-latest"></option><option value="jev-preview"></option><option value="clef"></option><option value="clef-flash"></option><option value="d1"></option><option value="english"></option><option value="multilingual"></option><option value="typed-decisions"></option></datalist>
       <label for="limit">1回の開始でのAPI呼び出し上限</label>
       <input id="limit" type="number" min="0" step="1" value="0" required>
       <small>0は無制限。1以上で任意の回数を指定できます。次の開始から反映します。</small>
@@ -35,7 +44,7 @@
     <div class="actions"><button id="start" type="button">保存して開始</button><button id="stop" class="secondary" type="button">停止</button></div>
     <p id="status" role="status" aria-live="polite">設定を読み込んでいます…</p>
     <div class="links"><a href="https://www.chofusai.jp/map/" target="_blank" rel="noopener">ゲームを開く ↗</a><a href="https://console.typesafe.ai/" target="_blank" rel="noopener">APIキーを取得 ↗</a></div>
-    <p class="note">ゲームの数値状態を選んだ接続先に送信します。キーは接続先ごとに保存し、切り替えても残ります。ローカルモデルのサーバーは別途起動してください。</p>
+    <p class="note">ゲームの数値状態を選んだ接続先に送信します。キーは接続先ごとに保存し、切り替えても残ります。Layaは別途起動してください。</p>
     <button id="clearKey" type="button" class="text-button">この接続先の保存済みキーを削除</button>
   </main>
   <script src="core.js"></script><script src="popup.js"></script>
